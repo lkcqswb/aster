@@ -3,6 +3,7 @@ pub mod config;
 pub mod context;
 pub mod edits;
 pub mod instructions;
+pub mod lifecycle;
 pub mod live2d;
 pub mod session;
 pub mod tools;

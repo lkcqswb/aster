@@ -40,4 +40,8 @@ Live command output, explicit stop/timeout/exit states, bounded head-and-tail ca
 
 Configurable runtime texture scaling with a 2048-pixel default, actual size diagnostics and loading progress. Native assets remain unchanged. Three profiles were checked for animation and visual quality; the default uses 75% fewer texture pixels.
 
-Next: process lifecycle, stronger project search, and evidence-aware review across task steps.
+## Delivered in 0.8
+
+Signal-aware shutdown, session checkpoints on interrupted work, and shared ownership of renderer/command process groups. Real terminal tests stop idle animation, an unanswered approval and a running command; a headless cancellation returns a failing exit status. Terminal restoration, child cleanup and private renderer profile removal are checked.
+
+Next: evidence-aware review across task steps and stronger project search.

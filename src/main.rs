@@ -6,6 +6,7 @@ use aster::{
 use clap::Parser;
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let _lifetime = aster::lifecycle::install()?;
     let cfg = Config::load(&cli)?;
     if let Some(dir) = &cli.live2d_probe {
         return aster::live2d::probe(&cfg, dir);

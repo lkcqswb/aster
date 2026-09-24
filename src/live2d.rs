@@ -9,7 +9,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     net::TcpStream,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -74,6 +74,7 @@ impl Companion {
                     let phase = sh.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
                     let retry = attempt == 1
                         && !st.load(Ordering::Relaxed)
+                        && !crate::lifecycle::requested()
                         && sh.lock().unwrap_or_else(|e| e.into_inner()).frames == 0
                         && phase != "Finding her model…";
                     if retry {
@@ -128,7 +129,7 @@ impl Drop for Companion {
     }
 }
 struct Browser {
-    child: Child,
+    child: crate::lifecycle::ManagedChild,
     _profile: tempfile::TempDir,
 }
 impl Browser {
@@ -155,7 +156,7 @@ impl Browser {
     fn wait_port(&mut self, stop: &AtomicBool, timeout: Duration) -> Result<Option<u16>> {
         let started = Instant::now();
         loop {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || crate::lifecycle::requested() {
                 return Ok(None);
             }
             self.check_running()?;
@@ -169,12 +170,6 @@ impl Browser {
             }
             thread::sleep(Duration::from_millis(100));
         }
-    }
-}
-impl Drop for Browser {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 struct AssetServer {
@@ -363,7 +358,8 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
     let profile = tempfile::Builder::new().prefix("aster-live2d-").tempdir()?;
     let log = fs::File::create(profile.path().join("renderer.log"))?;
     report(cfg, shared, "Starting the Live2D renderer…", None);
-    let child = Command::new(&cfg.chrome)
+    let mut command = Command::new(&cfg.chrome);
+    command
         .args([
             "--headless=new",
             "--no-first-run",
@@ -388,8 +384,8 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
         .arg(&server.url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
-        .spawn()?;
+        .stderr(Stdio::from(log));
+    let child = crate::lifecycle::spawn_group(&mut command)?;
     let mut browser = Browser {
         child,
         _profile: profile,
@@ -424,7 +420,7 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
         if started.elapsed() > Duration::from_secs(25) {
             bail!("No private renderer tab")
         };
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed) || crate::lifecycle::requested() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -438,7 +434,7 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
     report(cfg, shared, "Loading her Live2D model…", None);
     let mut last_loading = Value::Null;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed) || crate::lifecycle::requested() {
             return Ok(());
         }
         let value = cdp.evaluate(
@@ -482,7 +478,7 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
         thread::sleep(Duration::from_millis(120));
     }
     let mut previous = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.load(Ordering::Relaxed) && !crate::lifecycle::requested() {
         let frame_start = Instant::now();
         let dt = previous.elapsed().as_millis().clamp(16, 250);
         previous = Instant::now();
@@ -630,6 +626,9 @@ pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
     let started = Instant::now();
     let mut first = None;
     loop {
+        if crate::lifecycle::requested() {
+            bail!("Renderer probe interrupted");
+        }
         let s = c.current();
         if s.status.starts_with("Live2D unavailable") {
             bail!(s.status)
@@ -750,11 +749,11 @@ mod tests {
     fn browser_exit_reports_stderr_without_waiting_for_startup_timeout() {
         let profile = tempfile::tempdir().unwrap();
         let log = fs::File::create(profile.path().join("renderer.log")).unwrap();
-        let child = Command::new("/bin/sh")
+        let mut command = Command::new("/bin/sh");
+        command
             .args(["-c", "printf 'renderer fixture failed' >&2; exit 7"])
-            .stderr(log)
-            .spawn()
-            .unwrap();
+            .stderr(log);
+        let child = crate::lifecycle::spawn_group(&mut command).unwrap();
         let mut browser = Browser {
             child,
             _profile: profile,

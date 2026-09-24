@@ -362,29 +362,6 @@ impl Capture {
         }
     }
 }
-struct ProcessGroup {
-    child: std::process::Child,
-    cleaned: bool,
-}
-impl ProcessGroup {
-    fn kill(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.cleaned = true;
-    }
-}
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
 fn shell(
     root: &Path,
     command: &str,
@@ -412,15 +389,7 @@ fn shell(
             cmd.env_remove(key);
         }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut process = ProcessGroup {
-        child: cmd.spawn()?,
-        cleaned: false,
-    };
+    let mut process = crate::lifecycle::spawn_group(&mut cmd)?;
     let stdout = Arc::new(Mutex::new(Capture::default()));
     let stderr = Arc::new(Mutex::new(Capture::default()));
     let drain = |mut stream: Box<dyn Read + Send>, capture: Arc<Mutex<Capture>>| {

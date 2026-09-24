@@ -612,7 +612,7 @@ impl App {
     fn request_quit(&mut self) {
         if self.running.is_some() {
             self.stop();
-            self.quit_started = Some(Instant::now());
+            self.quit_started.get_or_insert_with(Instant::now);
         } else {
             self.quit = true;
         }
@@ -1744,14 +1744,24 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
     }
     let mut app = App::new(cfg, cli, store)?;
     let mut terminal = ratatui::init();
-    execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     let result = (|| -> Result<()> {
+        execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         while !app.quit {
+            if crate::lifecycle::requested() {
+                app.request_quit();
+            }
             app.tick()?;
+            if app.quit {
+                break;
+            }
+            if crate::lifecycle::requested() {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             let old_area = app.last_image.map(|(_, r)| r);
             terminal.draw(|f| app.draw(f))?;
             if old_area.is_some_and(|r| r != app.image_area) {
-                print!("{}", app.graphics.clear());
+                write!(io::stdout(), "{}", app.graphics.clear())?;
                 terminal.clear()?;
                 terminal.draw(|f| app.draw(f))?;
                 app.last_image = None;
@@ -1761,7 +1771,11 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 && let Some(frame) = &app.portrait.frame
                 && app.last_image != Some((frame.sequence, app.image_area))
             {
-                print!("{}", app.graphics.encode(&frame.png, app.image_area));
+                write!(
+                    io::stdout(),
+                    "{}",
+                    app.graphics.encode(&frame.png, app.image_area)
+                )?;
                 io::stdout().flush()?;
                 app.last_image = Some((frame.sequence, app.image_area));
             }
@@ -1776,7 +1790,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         app.paste(&text);
                     }
                     TermEvent::Resize(_, _) => {
-                        print!("{}", app.graphics.clear());
+                        write!(io::stdout(), "{}", app.graphics.clear())?;
                         terminal.clear()?;
                         app.last_image = None;
                     }
@@ -1812,7 +1826,21 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
         app.persist()?;
         Ok(())
     })();
-    print!("{}", app.graphics.clear());
+    if result.is_err() {
+        app.request_quit();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.running.is_some() && Instant::now() < deadline {
+            if app.tick().is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if app.running.is_some() {
+            app.session.status = "interrupted".into();
+        }
+        let _ = app.persist();
+    }
+    let _ = write!(io::stdout(), "{}", app.graphics.clear());
     let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
     result
@@ -1839,7 +1867,26 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
     s.status = "thinking".into();
     store.save(&s)?;
     let running = agent::spawn(prior, prompt.into(), cfg, cli.permissions);
-    for event in &running.events {
+    let mut stopping = None;
+    loop {
+        if crate::lifecycle::requested() {
+            running.cancel.store(true, Ordering::Relaxed);
+            let started = stopping.get_or_insert_with(Instant::now);
+            if started.elapsed() > Duration::from_secs(2) {
+                s.status = "interrupted".into();
+                s.add(
+                    "notice",
+                    "Interrupted during shutdown. Inspect project state before continuing.",
+                );
+                store.save(&s)?;
+                bail!("Interrupted by shutdown signal");
+            }
+        }
+        let event = match running.events.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        };
         match event {
             Event::Delta(t) => {
                 print!("{}", clean(&t));
@@ -1856,14 +1903,22 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 let _ = answer.send(String::new());
                 eprintln!("Question unanswered: interactive input is needed.");
             }
-            Event::Checkpoint(s) => store.save(&s)?,
+            Event::Work(work) => s.work = *work,
+            Event::Usage(input, output) => {
+                s.input_tokens = input;
+                s.output_tokens = output;
+            }
+            Event::Checkpoint(checkpoint) => {
+                s = *checkpoint;
+                store.save(&s)?;
+            }
             Event::Finished(s) => {
                 store.save(&s)?;
                 println!(
                     "\nSession {} · {} · {} input / {} output tokens",
                     s.id, s.status, s.input_tokens, s.output_tokens
                 );
-                if s.status == "error" {
+                if matches!(s.status.as_str(), "error" | "stopped" | "interrupted") {
                     bail!("Turn ended with an error")
                 };
                 if cli.prompt.as_ref().is_some_and(|p| p.starts_with("/run "))
@@ -1889,6 +1944,9 @@ pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()
     }
     let start = Instant::now();
     while app.companion.is_some() {
+        if crate::lifecycle::requested() {
+            bail!("Preview interrupted");
+        }
         app.tick()?;
         if app.portrait.frame.is_some() || app.portrait.status.starts_with("Live2D unavailable") {
             break;

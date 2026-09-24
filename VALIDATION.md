@@ -1,3 +1,12 @@
+# Shutdown and process ownership 0.8 — 2026-09-24
+
+- **45 Rust tests passed**, plus formatting, Clippy with warnings denied and the release build. The general keyboard/session/approval/fork/resize PTY regression passed.
+- Real owned-process signal tests passed for animated idle (`SIGHUP`), a pending approval (`SIGTERM`), an active command (`SIGTERM`) and a headless command (`SIGTERM`). The terminal cases saved state, restored the alternate screen and exited in **0.378, 0.237 and 0.212 seconds** in this run. Headless cancellation saved a stopped result and returned exit 1.
+- All nine observed renderer processes ended and its one private profile was removed. The shell and its background child ended in both command cases. The unapproved command never started; no delayed completion marker appeared. Evidence: `.aster/qa/shutdown-e2e.json`. No API requests were made.
+- Signal handling is cooperative; it does not promise cleanup after `SIGKILL`, a machine crash, or cancellation of an already submitted provider request.
+
+---
+
 # Renderer texture profiles 0.7 — 2026-09-24
 
 - **45 Rust tests passed**, including validated texture bounds and the private settings endpoint's host/path restrictions. Formatting, Clippy with warnings denied and the release build passed.

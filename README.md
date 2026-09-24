@@ -117,6 +117,8 @@ While work runs, **Enter steers** and **Alt+Enter queues a follow-up**. **Ctrl+G
 
 The queue is saved with the conversation (up to eight messages / 32 KB). A normal finish advances it; a stop, error or restart leaves it waiting for `/next`. Forks start with an empty queue so the same pending work does not run in two conversations.
 
+On Unix, terminal hangup and termination signals request a saved, orderly shutdown. Active commands are cancelled with their background children; the private renderer and its profile are removed. An interrupted provider request may still consume tokens. A forced process kill cannot run cleanup or save new state.
+
 Forks share the project filesystem. They do not roll back files. Compaction is deterministic local context reduction, not an LLM-generated summary; the full earlier session is archived privately before reduction.
 
 Sessions live in `~/.local/share/aster`, with private files, atomic writes and an exclusive store lock. Use `--state-dir` for a separate store. Session listing is scoped to the project. No API key is stored in session files. Exports omit private provider content such as thinking blocks.

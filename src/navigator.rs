@@ -59,6 +59,8 @@ pub struct Navigator {
     preview: Option<Preview>,
     job: Option<Job>,
     dirty: Option<Instant>,
+    /// Enter arrived while results were refreshing.
+    open_when_ready: bool,
     error: String,
     detail: String,
 }
@@ -76,6 +78,7 @@ impl Navigator {
             preview: None,
             job: None,
             dirty: None,
+            open_when_ready: false,
             error: String::new(),
             detail: String::new(),
         };
@@ -222,6 +225,27 @@ impl Navigator {
             if skipped + errors > 0 {
                 self.detail += &format!(" · {skipped} skipped · {errors} scan errors");
             }
+            if std::mem::take(&mut self.open_when_ready) && !self.busy() {
+                self.open_selected();
+            }
+        }
+    }
+    fn open_selected(&mut self) {
+        if let Some(hit) = self.hits.get(self.index).cloned() {
+            self.preview = Some(Preview {
+                offset: hit
+                    .line
+                    .map(|line| line.saturating_sub(4).max(1))
+                    .unwrap_or(1),
+                column: 1,
+                hit,
+                text: String::new(),
+                lines: 0,
+                next: None,
+                history: vec![],
+                scroll: 0,
+            });
+            self.load_preview();
         }
     }
     pub fn busy(&self) -> bool {
@@ -231,6 +255,7 @@ impl Navigator {
         self.preview.is_some()
     }
     fn changed_query(&mut self) {
+        self.open_when_ready = false;
         self.job = None;
         self.dirty = Some(Instant::now());
         self.offset = 0;
@@ -330,24 +355,10 @@ impl Navigator {
         match key.code {
             KeyCode::Down => self.index = (self.index + 1).min(self.hits.len().saturating_sub(1)),
             KeyCode::Up => self.index = self.index.saturating_sub(1),
-            KeyCode::Enter if !self.busy() => {
-                if let Some(hit) = self.hits.get(self.index).cloned() {
-                    self.preview = Some(Preview {
-                        offset: hit
-                            .line
-                            .map(|line| line.saturating_sub(4).max(1))
-                            .unwrap_or(1),
-                        column: 1,
-                        hit,
-                        text: String::new(),
-                        lines: 0,
-                        next: None,
-                        history: vec![],
-                        scroll: 0,
-                    });
-                    self.load_preview();
-                }
-            }
+            // Enter during a refresh opens the selection once the results arrive; the
+            // results on screen may be stale, so opening them now could read the wrong file.
+            KeyCode::Enter if self.busy() => self.open_when_ready = true,
+            KeyCode::Enter => self.open_selected(),
             KeyCode::PageDown if !self.busy() => {
                 if let Some(offset) = self.next {
                     self.history.push(self.offset);
@@ -493,6 +504,31 @@ mod tests {
         assert!(
             matches!(nav.key(key(KeyCode::Tab)), Action::Attach(reference) if reference=="@{beta.txt:1-80}")
         );
+    }
+    #[test]
+    fn enter_during_a_refresh_opens_the_fresh_result_instead_of_being_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "Use Chinese\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "other\n").unwrap();
+        let mut nav = Navigator::new(dir.path().into(), Mode::Files, String::new());
+        finish(&mut nav);
+        // Stale results are on screen while the new filter is still pending.
+        nav.paste("notes");
+        assert!(nav.busy());
+        nav.key(key(KeyCode::Enter));
+        assert!(nav.preview.is_none());
+        finish(&mut nav);
+        assert_eq!(nav.preview.as_ref().unwrap().hit.path, "notes.txt");
+        finish(&mut nav);
+        assert!(nav.preview.as_ref().unwrap().text.contains("Use Chinese"));
+        // Typing again after Enter cancels the pending open.
+        let mut nav = Navigator::new(dir.path().into(), Mode::Files, String::new());
+        finish(&mut nav);
+        nav.paste("notes");
+        nav.key(key(KeyCode::Enter));
+        nav.key(key(KeyCode::Backspace));
+        finish(&mut nav);
+        assert!(nav.preview.is_none());
     }
     #[test]
     fn large_file_preview_and_attachment_keep_the_exact_selected_range() {

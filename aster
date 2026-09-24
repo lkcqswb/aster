@@ -1,9 +1,18 @@
 #!/bin/sh
 set -eu
 aster_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-cd "$aster_dir"
-if [ ! -x .venv/bin/python ]; then
-  printf '%s\n' 'Set up Aster first:' 'python3 -m venv .venv' '.venv/bin/python -m pip install -r requirements-tui.txt'
-  exit 1
+aster_binary="$aster_dir/target/release/aster"
+if [ ! -x "$aster_binary" ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    aster_cargo=cargo
+  elif [ -x "$HOME/.cargo/bin/cargo" ]; then
+    aster_cargo="$HOME/.cargo/bin/cargo"
+  else
+    printf '%s\n' 'Aster needs a Rust toolchain for the first build: https://rustup.rs' >&2
+    exit 1
+  fi
+  printf '%s\n' 'Building Aster…' >&2
+  "$aster_cargo" build --release --locked --manifest-path "$aster_dir/Cargo.toml"
 fi
-exec .venv/bin/python -m relay tui "$@"
+export ASTER_HOME="$aster_dir"
+exec "$aster_binary" "$@"

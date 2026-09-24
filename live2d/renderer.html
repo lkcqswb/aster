@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>Aster private renderer</title>
+<style>html,body{margin:0;background:#111318;overflow:hidden}canvas{display:block}</style>
+<canvas id="portrait"></canvas>
+<script src="vendor/pixi.min.js"></script><script src="vendor/live2dcubismcore.min.js"></script><script src="vendor/pixi-live2d-display-cubism4.min.js"></script>
+<script>
+window.asterReady=false;window.asterError='';
+(async()=>{
+ const W=420,H=620,canvas=document.getElementById('portrait');
+ const app=new PIXI.Application({view:canvas,width:W,height:H,backgroundColor:0x111318,antialias:true,preserveDrawingBuffer:true,autoStart:false});
+ const model=await PIXI.live2d.Live2DModel.from('model/'+encodeURIComponent('弄玉.model3.json'),{autoInteract:false,autoUpdate:false});
+ app.stage.addChild(model);
+ model.scale.set(1);model.position.set(0,0);
+ const measured=model.getBounds();const raw={width:measured.width,height:measured.height};const scale=Math.min(W/raw.width,H/raw.height)*2.70;
+ model.scale.set(scale);const box=model.getBounds();
+ model.x+=W/2-(box.x+box.width/2);model.y+=H*.44-(box.y+box.height*.19);
+ const core=model.internalModel.coreModel;
+ let t=0,state='idle',mood='neutral',tap=0,look=0,frame=0;
+ const put=(id,v)=>{try{core.setParameterValueById(id,v)}catch(_){}};
+ model.internalModel.on('beforeModelUpdate',()=>{
+  const blinkPhase=t%4.7;const blink=blinkPhase>4.48?Math.abs((blinkPhase-4.59)/.11):1;
+  const attentive=state==='listening',thinking=state==='thinking',speaking=state==='speaking';
+  const sway=Math.sin(t*.8)*.8;
+  put('ParamAngleX',sway+(thinking?5:0)+(look>t?-5:0));
+  put('ParamAngleY',Math.sin(t*.6)*.6+(attentive?2:0)+(tap>t?Math.sin((tap-t)*9)*3:0));
+  put('ParamAngleZ',thinking?-2:0);put('ParamBodyAngleX',sway*.3);
+  put('ParamEyeBallX',thinking?.2:(look>t?-.25:0));put('ParamEyeBallY',thinking?.12:0);
+  put('ParamEyeLOpen',Math.max(0,Math.min(1,blink)));put('ParamEyeROpen',Math.max(0,Math.min(1,blink)));
+  put('ParamBreath',.5+Math.sin(t*1.3)*.5);
+  put('ParamMouthOpenY',speaking?Math.max(0,Math.sin(t*15)*.65+.25):0);
+  // This rig's mouth-form/brow deformers are asymmetric. Keep their neutral values.
+  put('ParamEyeLSmile',mood==='happy'||state==='pleased'?.45:0);put('ParamEyeRSmile',mood==='happy'||state==='pleased'?.45:0);
+  put('ParamHeartEye',mood==='heart'?1:0);
+  put('ParamTeers3',mood==='heart'||mood==='angry'?1:0);
+  put('ParamTeers5',mood==='angry'?1:0);put('ParamTeers2',mood==='angry'?1:0);
+ });
+ window.asterFrame=(next,dt=100)=>{
+  state=next.state||'idle';mood=next.mood||'neutral';
+  if(next.tap)tap=t+1.1;if(next.look)look=t+2;
+  t+=Math.min(250,dt)/1000;model.update(Math.min(250,dt));app.renderer.render(app.stage);frame++;
+  return {png:canvas.toDataURL('image/png').split(',')[1],frame,state,mood,time:t};
+ };
+ window.asterInfo={model:'弄玉',renderer:'Live2D Cubism + Pixi',textures:model.textures.length,width:W,height:H,raw:{width:raw.width,height:raw.height}};
+ window.asterFrame({state:'idle'});window.asterReady=true;
+})().catch(e=>{window.asterError=String(e&&e.message||e)});
+</script>

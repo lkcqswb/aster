@@ -1,4 +1,39 @@
-# Validation record
+# Rust rebuild validation — 2026-09-24
+
+Aster 0.2 uses the Rust application as its default launcher. The older Python results below are historical; they are not counted as Rust coverage.
+
+- `cargo test`: **17 tests passed**. Coverage includes real demo tool execution, permission before writes, plan-mode enforcement, cancellation before side effects, typed JSON checks, path and symlink boundaries, SSE thinking/tool-block preservation, truncated streams, private session persistence, context checkpoints, named forks, Unicode editing and compact/wide layouts.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and the optimized release build passed.
+- A real PTY drove slash completion, AGENTS.md inspection, named sessions, file-write approval, exact JSON verification, conversation fork/resume, Markdown export, 132×42 → 80×24 → 132×42 resizing, and zero-status exit.
+- The same PTY flow passed with the native iTerm inline-image path enabled. The Rust renderer loaded the actual nine-texture 弄玉 model, captured distinct idle/speaking frames, and emitted inline PNG image packets. Renderer processes and their temporary profiles were absent after exit.
+- Kitty graphics packet construction is unit-tested. Terminal-specific GUI rendering in Ghostty and Kitty has not been manually inspected. The full-layout preview comes from the actual Ratatui draw function and an actual model frame, rendered to SVG/PNG for visual inspection.
+- A fresh zsh login from `/tmp` resolves `aster` to version **0.2.0**. The launcher preserves the caller's project directory and runs the Rust binary.
+
+## Live model validation
+
+The successful live TUI run `0da59eeddd14` used **MiniMax-M2.7**, **3 model turns**, **3 tool calls**, **3,647 input tokens**, and **259 output tokens**. The test inspected the permission prompt before approving the expected file write. The resulting `result.json` matched this object exactly and passed the Rust `json_equals` check:
+
+```json
+{"language":"Rust","companion":"弄玉","proof":"jade-486"}
+```
+
+The session was saved and the terminal exited with status 0. Evidence is local in `.aster/qa/rust-minimax-e2e.json`; the complete private provider conversation is in the ignored QA session store.
+
+An earlier development run `dcf07cdcf985` wrote the correct file, but its tool check failed: the model supplied JSON text to an ambiguous schema that accepted any JSON type. The checker correctly rejected string-versus-object equality. The schema now explicitly asks for serialized JSON text and the checker parses it before comparing JSON values, preserving boolean/number/string distinctions. A regression test covers this. The test driver's separate `/var` versus `/private/var` path comparison was also corrected. The earlier run remains recorded as a failed check; it used **7,627 input tokens** and **670 output tokens** across **6 model turns**. No automatic provider retries were added.
+
+Total reported live usage for the Rust rebuild: **11,274 input tokens and 929 output tokens**, across these two explicitly invoked test turns. This is not a model benchmark or a currency-cost claim.
+
+## Local visual evidence
+
+- `.aster/qa/model/idle.png`, `speaking.png`, and `renderer.json`: Rust-owned renderer probe.
+- `.aster/qa/aster-rust.svg` and `aster-rust.png`: full workbench preview.
+- `.aster/qa/rust-terminal-e2e.json`: terminal workflow and graphics-path checks.
+
+Model assets and SDK files are read from the existing desktop-pet directory and were not copied into source. API keys, session data, private profiles, generated previews and build outputs are excluded from Git.
+
+---
+
+# Historical Python prototype validation
 
 ## Terminal interface — 2026-09-24
 

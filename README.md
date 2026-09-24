@@ -42,6 +42,7 @@ The companion pane is part of the terminal layout, not a separate window. iTerm2
 - Click the portrait or use `/look` for a glance and nod.
 - `/mood happy`, `/mood heart`, `/mood angry`, `/mood neutral` change her expression.
 - `/pet off` releases the renderer; `/pet on` starts it again.
+- `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
 Speaking motion follows text activity. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
 
@@ -63,6 +64,8 @@ By default Aster reads existing assets here:
 Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address.
 
 A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at up to 8 fps. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
+
+Startup diagnostics are saved privately in `~/.local/share/aster/diagnostics/live2d.json` (or under your selected `--state-dir`). This is a record of the latest startup or error transition, not a continuously updated frame counter. It contains no conversation or provider key. Renderer traffic stays on loopback and bypasses proxy settings. Browser stderr is retained only in its temporary profile, with a bounded excerpt included when startup fails.
 
 ## Conversations and commands
 
@@ -137,6 +140,7 @@ The optional real-PTY test driver uses the existing development-only Python test
 ```sh
 .venv/bin/python scripts/test_rust_e2e.py
 .venv/bin/python scripts/test_rust_e2e.py --live2d
+.venv/bin/python scripts/test_live2d_startup.py
 ```
 
 To validate the real model independently and save distinct animation frames:

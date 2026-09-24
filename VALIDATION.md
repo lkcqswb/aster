@@ -1,3 +1,15 @@
+# Live2D startup recovery — 2026-09-24
+
+Aster 0.2.1 adds explicit loading stages, browser-exit detection, private diagnostic records, and `/pet retry`. The renderer bypasses proxy settings for its loopback asset connection. A renderer worker failure is reported instead of leaving the initial loading message indefinitely.
+
+- **19 Rust tests passed**, including immediate browser-exit diagnostics and a missing-renderer failure that replaces the loading status. Formatting, Clippy with warnings denied, and the release build passed.
+- A real PTY test deliberately failed the first browser launch, verified the visible error and saved diagnostic, issued `/pet retry`, and received **10 distinct native iTerm image frames** from the actual nine-texture model. It exited with status 0 and made no API calls. Local evidence: `.aster/qa/live2d-startup-recovery.json`.
+- The full keyboard-driven terminal test also passed with Live2D enabled: project instructions, slash completion, approval before writing, independent JSON checks, session fork/resume/export, resizing, and clean exit. Its driver now waits for a modal to close before sending the next command instead of relying on a fixed delay during model loading.
+- The user's affected session previously reported `Opening her room…` with zero frames. After restarting into 0.2.1, its own diagnostic recorded `Live2D · connected`, the first captured frame, and all nine model textures. The user then confirmed that 弄玉 was **visible and moving in iTerm**. The old build discarded browser stderr, so the original failure's exact cause was not established.
+- The GitHub repository is public. All 59 historical Git blobs were checked before the visibility change; no configured credential or token-pattern match was found. Local model assets and SDKs remain excluded.
+
+---
+
 # Rust rebuild validation — 2026-09-24
 
 Aster 0.2 uses the Rust application as its default launcher. The older Python results below are historical; they are not counted as Rust coverage.

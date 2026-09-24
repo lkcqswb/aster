@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
+    io::{Read, Seek, SeekFrom},
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -59,9 +60,22 @@ impl Companion {
         let sh = shared.clone();
         let st = stop.clone();
         let handle = thread::spawn(move || {
-            if let Err(e) = render_loop(&cfg, &sh, &st) {
-                let mut s = sh.lock().unwrap();
-                s.status = format!("Live2D unavailable: {e}");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                render_loop(&cfg, &sh, &st)
+            }));
+            let error = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(format!("{e:#}")),
+                Err(_) => Some("The renderer worker stopped unexpectedly".into()),
+            };
+            if let Some(error) = error {
+                let phase = sh.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
+                report(
+                    &cfg,
+                    &sh,
+                    &format!("Live2D unavailable: {error}\n/pet retry · /status details"),
+                    Some(&phase),
+                );
             }
         });
         Self {
@@ -71,14 +85,17 @@ impl Companion {
         }
     }
     pub fn motion(&self, state: &str, mood: &str, tap: bool, look: bool) {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         s.motion.state = state.into();
         s.motion.mood = mood.into();
         s.motion.tap |= tap;
         s.motion.look |= look;
     }
     pub fn current(&self) -> Shared {
-        self.shared.lock().unwrap().clone()
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 impl Drop for Companion {
@@ -92,6 +109,46 @@ impl Drop for Companion {
 struct Browser {
     child: Child,
     _profile: tempfile::TempDir,
+}
+impl Browser {
+    fn check_running(&mut self) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            bail!("Chrome exited ({status}). {}", self.diagnostic());
+        }
+        Ok(())
+    }
+    fn diagnostic(&self) -> String {
+        let path = self._profile.path().join("renderer.log");
+        let Ok(mut file) = fs::File::open(path) else {
+            return String::new();
+        };
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let _ = file.seek(SeekFrom::Start(size.saturating_sub(4096)));
+        let mut bytes = Vec::new();
+        let _ = file.take(4096).read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes)
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .collect()
+    }
+    fn wait_port(&mut self, stop: &AtomicBool, timeout: Duration) -> Result<Option<u16>> {
+        let started = Instant::now();
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            self.check_running()?;
+            if let Ok(text) = fs::read_to_string(self._profile.path().join("DevToolsActivePort"))
+                && let Some(port) = text.lines().next().and_then(|p| p.parse::<u16>().ok())
+            {
+                return Ok(Some(port));
+            }
+            if started.elapsed() > timeout {
+                bail!("Chrome did not become ready. {}", self.diagnostic());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 impl Drop for Browser {
     fn drop(&mut self) {
@@ -219,6 +276,25 @@ struct Cdp {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     id: u64,
 }
+fn report(cfg: &Config, shared: &Arc<Mutex<Shared>>, status: &str, failed_phase: Option<&str>) {
+    let record = {
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.status = status.into();
+        if let Some(phase) = failed_phase {
+            s.info["failed_phase"] = json!(phase);
+        }
+        json!({"status":status,"info":s.info,"frames":s.frames,"pid":std::process::id(),"time":chrono::Utc::now().to_rfc3339()})
+    };
+    let dir = cfg.state.join("diagnostics");
+    if fs::create_dir_all(&dir).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
+        let _ = crate::session::atomic_json(&dir.join("live2d.json"), &record);
+    }
+}
 impl Cdp {
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         self.id += 1;
@@ -253,11 +329,14 @@ impl Cdp {
     }
 }
 fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>) -> Result<()> {
+    report(cfg, shared, "Finding her model…", None);
     if !cfg.chrome.is_file() {
         bail!("Chrome/Chromium not found; set ASTER_CHROME")
     }
     let server = assets(cfg)?;
     let profile = tempfile::Builder::new().prefix("aster-live2d-").tempdir()?;
+    let log = fs::File::create(profile.path().join("renderer.log"))?;
+    report(cfg, shared, "Starting the Live2D renderer…", None);
     let child = Command::new(&cfg.chrome)
         .args([
             "--headless=new",
@@ -266,6 +345,7 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
             "--disable-extensions",
             "--disable-sync",
             "--disable-background-networking",
+            "--no-proxy-server",
             "--metrics-recording-only",
             "--mute-audio",
             "--hide-scrollbars",
@@ -282,32 +362,23 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
         .arg(&server.url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(log))
         .spawn()?;
-    let browser = Browser {
+    let mut browser = Browser {
         child,
         _profile: profile,
     };
     let started = Instant::now();
-    let port = loop {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        if let Ok(text) = fs::read_to_string(browser._profile.path().join("DevToolsActivePort"))
-            && let Some(port) = text.lines().next().and_then(|p| p.parse::<u16>().ok())
-        {
-            break port;
-        }
-        if started.elapsed() > Duration::from_secs(20) {
-            bail!("Chromium renderer did not start")
-        };
-        thread::sleep(Duration::from_millis(100));
+    let Some(port) = browser.wait_port(stop, Duration::from_secs(20))? else {
+        return Ok(());
     };
+    report(cfg, shared, "Connecting to her renderer…", None);
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()?;
     let url = loop {
+        browser.check_running()?;
         let tabs = client
             .get(format!("http://127.0.0.1:{port}/json/list"))
             .send()?
@@ -338,6 +409,7 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
         tcp.set_write_timeout(Some(Duration::from_secs(5)))?;
     }
     let mut cdp = Cdp { socket, id: 0 };
+    report(cfg, shared, "Loading her Live2D model…", None);
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -346,16 +418,15 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
             "({ready:window.asterReady,error:window.asterError,info:window.asterInfo})",
         )?;
         if value["ready"] == true {
-            let mut s = shared.lock().unwrap();
-            s.info = value["info"].clone();
-            s.status = "Live2D · connected".into();
+            shared.lock().unwrap().info = value["info"].clone();
+            report(cfg, shared, "Drawing her first frame…", None);
             break;
         }
         if let Some(e) = value["error"].as_str().filter(|e| !e.is_empty()) {
             bail!("{e}")
         }
         if started.elapsed() > Duration::from_secs(60) {
-            bail!("Model loading timed out")
+            bail!("Model loading timed out. {}", browser.diagnostic())
         };
         thread::sleep(Duration::from_millis(120));
     }
@@ -388,6 +459,9 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
                 sequence: s.frames,
                 image,
             });
+        }
+        if shared.lock().unwrap().frames == 1 {
+            report(cfg, shared, "Live2D · connected", None);
         }
         // The native model updates every captured frame. 8 fps keeps terminal bandwidth and CPU bounded.
         let rest = Duration::from_millis(125).saturating_sub(frame_start.elapsed());
@@ -555,5 +629,54 @@ mod tests {
         assert!(kitty.contains("a=T,f=100"));
         assert!(kitty.contains("m=0"));
         assert!(kitty.ends_with("\x1b8"));
+    }
+    #[test]
+    #[cfg(unix)]
+    fn browser_exit_reports_stderr_without_waiting_for_startup_timeout() {
+        let profile = tempfile::tempdir().unwrap();
+        let log = fs::File::create(profile.path().join("renderer.log")).unwrap();
+        let child = Command::new("/bin/sh")
+            .args(["-c", "printf 'renderer fixture failed' >&2; exit 7"])
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        let mut browser = Browser {
+            child,
+            _profile: profile,
+        };
+        let start = Instant::now();
+        let error = browser
+            .wait_port(&AtomicBool::new(false), Duration::from_secs(20))
+            .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(error.to_string().contains("renderer fixture failed"));
+        assert!(error.to_string().contains('7'));
+    }
+    #[test]
+    fn startup_failure_replaces_loading_and_saves_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            home: root.path().into(),
+            project: root.path().into(),
+            state: root.path().join("state"),
+            key: "must-not-appear-in-log".into(),
+            base: String::new(),
+            model: String::new(),
+            pet: root.path().join("pet"),
+            chrome: root.path().join("missing-chrome"),
+        };
+        let companion = Companion::start(cfg.clone());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !companion.handle.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let state = companion.current();
+        assert!(state.status.contains("Chrome/Chromium not found"));
+        assert!(state.status.contains("/pet retry"));
+        assert_eq!(state.info["failed_phase"], "Finding her model…");
+        let log = fs::read_to_string(cfg.state.join("diagnostics/live2d.json")).unwrap();
+        assert!(log.contains("Chrome/Chromium not found"));
+        assert!(!log.contains(&cfg.key));
     }
 }

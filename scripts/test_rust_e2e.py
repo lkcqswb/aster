@@ -49,12 +49,18 @@ def main():
             raise AssertionError(f'Missing screen text {needle!r}\n'+ '\n'.join(screen.display))
         def send(command,needle):
             child.send(command+'\r');wait(needle)
+        def dismiss(needle,timeout=12):
+            child.send('\x1b')
+            deadline=time.monotonic()+timeout
+            while time.monotonic()<deadline:
+                if needle not in pump(): return
+            raise AssertionError(f'Panel did not close: {needle}')
         try:
             wait('aster')
             send('/agents','jade-check')
-            child.send('\x1b');time.sleep(.2);pump()
+            dismiss('Project instructions')
             child.send('/');wait('Start a fresh conversation')
-            child.send('\x1b');time.sleep(.2);pump()
+            dismiss('Start a fresh conversation')
             send('/rename Jade terminal test','Jade terminal test')
             send('/demo','Allow write_file?')
             assert not (project/'aster-demo.json').exists()

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay · Agent workspace</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Relay home"><span class="brand-mark">↗</span>relay<span class="version">/ 0.1</span></a>
+    <div class="workspace-label"><span class="workspace-icon">A</span><div>Aster’s workspace<small>LOCAL ENVIRONMENT</small></div><span class="online-dot"></span></div>
+    <nav aria-label="Main navigation">
+      <button class="nav active" data-view="runs"><span>◫</span> Runs <span id="run-count" class="nav-count">0</span></button>
+      <button class="nav" data-view="tasks"><span>▤</span> Task library</button>
+      <button class="nav" data-view="tools"><span>⌘</span> Tools & limits</button>
+    </nav>
+    <div class="section-label sidebar-label">RECENT RUNS <span>↙</span></div>
+    <div id="run-list" class="run-list"><p class="muted empty-small">Your first run starts here.</p></div>
+    <div class="sidebar-bottom"><span class="online-dot"></span><div>Running on your machine<small>Files and traces stay local</small></div></div>
+  </aside>
+  <main>
+    <header class="topbar"><div><span class="muted">Workspace</span><span class="slash">/</span><span id="breadcrumb">Runs</span></div><div class="topbar-right"><span id="connection" class="connection">Checking provider…</span><button id="new-run" class="primary small">＋ New run</button></div></header>
+    <div class="main-content">
+      <section class="heading"><div class="eyebrow"><span class="tiny-square"></span> THE AGENT WORKBENCH</div><div class="heading-row"><div><h1>Every step. In the open.</h1><p>Give an agent a task. Follow the work. Check the result.</p></div><div class="local-badge"><span class="online-dot"></span> LOCAL FIRST</div></div></section>
+      <section class="metrics" aria-label="Run statistics">
+        <div><span>RUNS</span><strong id="metric-runs">0</strong><small>Recorded in this workspace</small></div>
+        <div><span>VERIFIED</span><strong id="metric-passed">—</strong><small id="metric-passed-detail">No checked runs yet</small></div>
+        <div><span>TOOL CALLS</span><strong id="metric-tools">0</strong><small>Actions with a recorded result</small></div>
+        <div><span>OUTPUT TOKENS</span><strong id="metric-tokens">0</strong><small>Reported by the model provider</small></div>
+      </section>
+      <section id="runs-view" class="view">
+        <div id="empty-state" class="empty-state"><div class="empty-art" aria-hidden="true"><span>◎</span><i></i><span>⌘</span><i></i><span>✓</span></div><div class="eyebrow">ONE TASK. A VISIBLE LOOP.</div><h2>Let’s put an agent to work.</h2><p>Start with a sample task, or bring your own files and success checks.</p><button class="primary" id="empty-start">Create your first run <span>↗</span></button><small>A scripted demo is available without an API key.</small></div>
+        <div id="run-workspace" hidden>
+          <div class="run-picker"><label for="history-select">RUN HISTORY</label><select id="history-select" aria-label="Run history"></select></div>
+          <div class="run-heading"><div><div class="eyebrow" id="run-id"></div><h2 id="run-title"></h2><div class="run-meta"><span id="run-status"></span><span id="run-model"></span><span id="run-time"></span><span id="run-lineage"></span></div></div><div class="run-actions"><button id="stop-run" class="danger" hidden>Stop run</button><button id="export-run" class="secondary">↓ Export trace</button><button id="replay-run" class="secondary">↻ Replay / branch</button></div></div>
+          <div class="run-grid">
+            <section class="trace-panel"><div class="panel-title"><span>Execution timeline</span><span id="event-count" class="muted"></span></div><div id="run-error" class="error-banner" hidden></div><div id="timeline" class="timeline" aria-live="polite"></div><div id="final-answer" class="final-answer" hidden></div></section>
+            <aside class="inspector"><div class="inspector-tabs" role="tablist"><button id="tab-checks" class="selected" data-tab="checks" role="tab" aria-selected="true">Checks <span id="check-count"></span></button><button id="tab-files" data-tab="files" role="tab" aria-selected="false">Files <span id="file-count"></span></button><button id="tab-task" data-tab="task" role="tab" aria-selected="false">Task</button></div><div id="inspector-content" class="inspector-content"></div><div class="budget-panel"><div class="section-label">RUN BUDGET</div><div id="budget"></div><p>Limits apply to this run. In-flight requests may still consume tokens after stopping.</p></div></aside>
+          </div>
+        </div>
+      </section>
+      <section id="tasks-view" class="view" hidden><div class="section-heading"><h2>A small task. A clear finish line.</h2><p>Each task pairs starting files with independent checks.</p></div><div id="task-cards" class="task-cards"></div></section>
+      <section id="tools-view" class="view" hidden><div class="section-heading"><h2>Small tools. Explicit boundaries.</h2><p>The agent works in a fresh directory for each run. Your other files are outside its reach.</p></div><div id="tool-cards" class="tool-cards"></div><div class="info-card"><h3>How the loop works</h3><div class="loop-diagram"><span>Task + files</span><b>→</b><span>Model</span><b>⇄</b><span>Tools</span><b>→</b><span>Checks</span></div><p>Each turn records tool arguments and results. After tool execution, Relay saves the conversation and workspace as a checkpoint. When the model finishes, Relay checks its files against your original criteria.</p><p>MiniMax receives task instructions and tool results. Credentials never enter the model conversation or browser. This version supports text files and arithmetic; it does not execute shell commands.</p><p>Turn, tool, time, and output-token limits bound each run. These are not currency spending caps. Truncated responses and provider errors stop the run without automatic retries.</p></div></section>
+      <footer><span>relay <span class="muted">/ observable by design</span></span><span>RUN → OBSERVE → VERIFY → ITERATE</span></footer>
+    </div>
+  </main>
+  <dialog id="run-dialog"><form id="run-form"><div class="dialog-heading"><div><div class="eyebrow">START SOMETHING</div><h2>New run</h2></div><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><label for="task-select">Task</label><select id="task-select"></select><p id="task-description" class="field-hint"></p><div id="custom-fields" hidden><label for="custom-title">Title</label><input id="custom-title" value="My first task" maxlength="120"><label for="custom-prompt">What should the agent do?</label><textarea id="custom-prompt" rows="4" placeholder="Describe the desired result and which files to create or edit."></textarea><label for="custom-files">Starting files · JSON object</label><textarea id="custom-files" rows="3" spellcheck="false">{"notes.txt": "Hello, Aster."}</textarea><label for="custom-checks">Success checks · JSON array</label><textarea id="custom-checks" rows="3" spellcheck="false">[{"name":"Result created","type":"exists","path":"result.txt"}]</textarea><p class="field-hint">Check types: exists, contains, text_equals, json_equals. Comparisons use an “expected” value.</p></div><div class="form-row"><div><label for="provider-select">Agent</label><select id="provider-select"><option value="minimax">MiniMax · live model</option><option value="demo">Scripted demo · no API calls</option></select></div><div><label for="model-input">Model</label><input id="model-input" value="MiniMax-M2.7" maxlength="120"></div></div><p id="provider-hint" class="field-hint"></p><details class="limits-details"><summary>Run limits <span>Bound the work before it starts</span></summary><div class="form-row"><div><label for="max-steps">Max turns</label><input id="max-steps" type="number" min="1" max="30" value="12" required></div><div><label for="max-seconds">Max seconds</label><input id="max-seconds" type="number" min="1" max="600" value="180" required></div></div><div class="form-row"><div><label for="max-output">Output tokens / turn</label><input id="max-output" type="number" min="64" max="4096" value="2048" required></div><div><label for="total-output">Total output tokens</label><input id="total-output" type="number" min="64" max="32768" value="12000" required></div></div></details><p id="form-error" class="form-error" role="alert" hidden></p><div class="dialog-footer"><span>Fresh workspace. Saved trace.</span><button id="launch-run" class="primary" type="submit">Run task <span>↗</span></button></div></form></dialog>
+  <dialog id="replay-dialog"><form id="replay-form"><div class="dialog-heading"><div><div class="eyebrow">TRY ANOTHER PATH</div><h2>Replay / branch</h2></div><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><p class="field-hint">Start a new run from a saved workspace and conversation. The original run and success checks stay intact. A MiniMax replay makes new API calls.</p><label for="checkpoint-select">Resume from</label><select id="checkpoint-select"></select><label for="replay-instruction">Additional instruction <span class="muted">optional</span></label><textarea id="replay-instruction" rows="3" placeholder="Try a different approach, or correct a mistake…"></textarea><label for="replay-model">Model</label><input id="replay-model" maxlength="120"><p class="field-hint" id="replay-hint"></p><p id="replay-error" class="form-error" role="alert" hidden></p><div class="dialog-footer"><span>A new run with fresh limits.</span><button class="primary" type="submit">Start branch ↗</button></div></form></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

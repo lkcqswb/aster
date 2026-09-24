@@ -1,0 +1,8 @@
+{
+  "title": "Extract a project codename",
+  "prompt": "Read brief.txt. Write result.json containing exactly the keys codename and owner with their values from the brief. Preserve brief.txt.",
+  "files": {"brief.txt": "The project codename is Fern. Its owner is Aster. The first milestone is a working prototype."},
+  "checks": [
+    {"name": "Extracted fields match the brief", "type": "json_equals", "path": "result.json", "expected": {"codename": "Fern", "owner": "Aster"}}
+  ]
+}

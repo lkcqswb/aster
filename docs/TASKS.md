@@ -32,7 +32,7 @@ A tracked starter is in `examples/tasks.json`. The Aster repository ignores its 
 
 Without explicit configuration, `Cargo.toml` provides `cargo:test`, `cargo:check` and `cargo:build`. String entries in `package.json` scripts become tasks using the detected lockfile's runner: pnpm, yarn, bun, then npm as the fallback. Multiple lockfiles use that order. Commands use `RUNNER run SCRIPT`; package scripts may themselves run arbitrary project code, which is why the usual shell permission applies.
 
-Limits: 32 tasks, 64 KB per source file, unique names up to 64 ASCII letters/numbers/hyphens/underscores/colons starting with a letter or number, descriptions up to 240 bytes, commands up to 4,000 bytes and timeouts from 1 to 120 seconds (default 120). Source files must be regular files inside the project; symlink sources and unknown configuration fields are rejected. Unsupported package-script names are skipped. The task is resolved again when run so the approval uses current configuration, not an old picker snapshot.
+Limits: 32 tasks, 64 KB per source file, unique names up to 64 ASCII letters/numbers/hyphens/underscores/colons starting with a letter or number, descriptions up to 240 bytes, commands up to 4,000 bytes and timeouts from 1 to 600 seconds (default 120). Source files must be regular files inside the project; symlink sources and unknown configuration fields are rejected. Unsupported package-script names are skipped. The task is resolved again when run so the approval uses current configuration, not an old picker snapshot.
 
 ## Automation outcomes
 

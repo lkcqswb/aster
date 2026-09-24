@@ -36,13 +36,7 @@ use std::{
 };
 use unicode_width::UnicodeWidthStr;
 
-const BG: Color = Color::Rgb(17, 19, 24);
-const FG: Color = Color::Rgb(222, 218, 208);
-const DIM: Color = Color::Rgb(116, 124, 133);
-const JADE: Color = Color::Rgb(164, 196, 168);
-const GOLD: Color = Color::Rgb(217, 182, 131);
-const LINE: Color = Color::Rgb(49, 54, 62);
-const RED: Color = Color::Rgb(213, 144, 145);
+use crate::theme::{BG, DIM, FG, GOLD, JADE, LINE, RED};
 const COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a fresh conversation"),
     ("/sessions", "Find and resume a session"),
@@ -193,6 +187,14 @@ fn entry_lines(e: &Entry, width: usize, show_tools: bool) -> Vec<Line<'static>> 
         return lines;
     }
     lines.push(line(label, color));
+    if e.role == "nongyu" {
+        for mut rendered in crate::richtext::markdown(&e.text, width) {
+            rendered.spans.insert(0, Span::styled("  ", style(FG)));
+            lines.push(rendered);
+        }
+        lines.push(line("", FG));
+        return lines;
+    }
     for text in wrap_prose(&e.text, width) {
         lines.push(line(
             format!("  {text}"),
@@ -2182,8 +2184,15 @@ impl App {
             Paragraph::new(title).style(style(JADE).add_modifier(Modifier::BOLD)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
+        let diff_panel = matches!(p, Popup::Approval(a) if matches!(a.tool.as_str(), "write_file" | "edit_file"))
+            || matches!(p, Popup::Info{title,..} if title.starts_with("Review changes"));
+        let body = if diff_panel {
+            ratatui::text::Text::from(crate::richtext::diff(&text, inner.width as usize))
+        } else {
+            ratatui::text::Text::from(clean(&text))
+        };
         f.render_widget(
-            Paragraph::new(clean(&text))
+            Paragraph::new(body)
                 .style(style(FG))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0)),
@@ -2481,10 +2490,29 @@ pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()
                 _ => "#dedad0".into(),
             };
             svg += &format!(
-                "<text x=\"{}\" y=\"{}\" fill=\"{}\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{}\">{}</text>",
                 x as usize * cw,
                 y as usize * ch + 14,
                 color,
+                if c.modifier.contains(Modifier::BOLD) {
+                    "bold"
+                } else {
+                    "normal"
+                },
+                if c.modifier.contains(Modifier::ITALIC) {
+                    "italic"
+                } else {
+                    "normal"
+                },
+                match (
+                    c.modifier.contains(Modifier::UNDERLINED),
+                    c.modifier.contains(Modifier::CROSSED_OUT)
+                ) {
+                    (true, true) => "underline line-through",
+                    (true, false) => "underline",
+                    (false, true) => "line-through",
+                    _ => "none",
+                },
                 esc(c.symbol())
             );
         }

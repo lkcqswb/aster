@@ -46,6 +46,8 @@ The companion pane is part of the terminal layout, not a separate window. iTerm2
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
+Replies render headings, emphasis, lists, code blocks and tables with restrained terminal styling. Code keeps its indentation; approvals and reviews color additions and removals. [Reading and formatting](docs/FORMATTING.md) describes the display behavior.
+
 Her work card tracks the active plan step, file or command, pending decision, and recorded checks. Click her portrait or press **F1** for the searchable action menu; **F2** goes directly to the plan and evidence. **F3** reviews the exact file diffs from this turn. Questions and approval prompts stay beside her in a wide terminal, so she remains visible while you decide. Use `/demo work` to try the entire choice → approval → edit → verification flow without an API call. During a pending question or approval, F2–F6 open the plan, diffs, output, checks and files. Escape returns to the same decision with its typed answer or scroll position preserved. An inspection cannot approve an action; edits still reject any file changed since its diff was prepared.
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.

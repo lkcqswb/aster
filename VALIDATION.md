@@ -1,3 +1,9 @@
+# Readable replies and diffs 0.16 — 2026-09-24
+
+- **85 Rust tests passed**, formatting, strict Clippy and release build passed. Tests cover Markdown styles, preserved code spacing, diff colors, grapheme-aware wrapping, table widths and narrow fallbacks, nested blocks, inert HTML/entities and incomplete streamed Markdown.
+- The actual colored terminal verified heading/inline-code colors, bold/italic attributes, code indentation, tables and visible link destinations, then performed a reviewed write/edit/check and inspected colored diffs. **44 distinct frames**, resize, zero API calls, exit 0. Evidence: `.aster/qa/richtext-e2e.json`. The fixture explicitly unsets the tool environment's inherited `NO_COLOR=1`; production continues to honor it.
+- General terminal regression passed. The styled SVG/PNG preview was visually inspected alongside the actual companion: `.aster/qa/aster-richtext.svg` and `.png`. SVG capture now records text modifiers as well as color. This is terminal Markdown rendering, not language-specific code syntax highlighting or HTML execution.
+
 # Conversation history and transcript layout 0.15 — 2026-09-24
 
 - **79 Rust tests passed**, formatting, strict Clippy and release build passed. Coverage checks Unicode/role search, appended history, exclusion of provider thinking, cached idle layouts, invalidation after changes, near-match previews, draft-preserving jumps and a stable viewport when new entries arrive.

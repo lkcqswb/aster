@@ -73,4 +73,8 @@ Recoverable local context checkpoints with a byte budget, complete tool/result b
 
 Searchable visible conversation history with role filters, full entry previews, jumps to earlier entries and a return-to-latest shortcut. The draft and pending decisions survive inspection; provider thinking blocks are excluded. Transcript layout is cached between idle frames and keeps a scrolled viewport steady while messages arrive, allowing Live2D animation to continue without reformatting all earlier entries.
 
-Next: improve durable task/session navigation and explicit recovery.
+## Delivered in 0.16
+
+Markdown replies with styled headings, emphasis, inline code, nested lists, task markers, quotes, fenced code, tables and visible link destinations. Unicode graphemes and code spacing survive wrapping; narrow tables use stacked cells. Approval/review diffs distinguish additions and removals. Terminal controls remain inert, and SVG previews retain text styling. The actual animated terminal verified colors, a real approved edit and an independent passing check.
+
+Next: make repeatable project checks easier to run and strengthen automation outcomes.

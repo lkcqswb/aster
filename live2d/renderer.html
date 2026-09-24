@@ -3,12 +3,17 @@
 <canvas id="portrait"></canvas>
 <script src="vendor/pixi.min.js"></script><script src="vendor/live2dcubismcore.min.js"></script><script src="vendor/pixi-live2d-display-cubism4.min.js"></script>
 <script>
+'use strict';
 window.asterReady=false;window.asterError='';window.asterStage='initializing';
 window.asterLoading={requested:0,loaded:0,rig:false,textures:[],warnings:[]};
-window.addEventListener('error',event=>{window.asterError=event.message||'Renderer resource failed';});
-window.addEventListener('unhandledrejection',event=>{window.asterError=String(event.reason||'Renderer promise failed');});
+const asterWarn=message=>{const list=window.asterLoading.warnings;if(list.length<24)list.push(String(message&&message.message||message).slice(0,240))};
+// Before she is ready a failure stops startup; afterwards (an optional motion or expression) it is only recorded.
+window.addEventListener('error',event=>{const m=event.message||'Renderer resource failed';if(window.asterReady)asterWarn(m);else window.asterError=m;});
+window.addEventListener('unhandledrejection',event=>{const m=String(event.reason&&event.reason.message||event.reason||'Renderer promise failed');if(window.asterReady)asterWarn(m);else window.asterError=m;});
 (async()=>{
- const W=420,H=620,canvas=document.getElementById('portrait');
+ const REF_W=420,REF_H=620,MIN_SIDE=160,MAX_SIDE=1400;
+ let W=REF_W,H=REF_H;
+ const canvas=document.getElementById('portrait');
  const app=new PIXI.Application({view:canvas,width:W,height:H,backgroundColor:0x111318,antialias:true,preserveDrawingBuffer:true,autoStart:false});
  window.asterStage='reading renderer settings';
  const settings=await fetch('settings.json').then(r=>{if(!r.ok)throw Error('Renderer settings unavailable');return r.json()});
@@ -34,45 +39,293 @@ window.addEventListener('unhandledrejection',event=>{window.asterError=String(ev
   window.asterLoading.loaded++;
   return rendered;
  };
+ window.asterStage='reading model definition';
+ const modelUrl='model/'+encodeURIComponent('弄玉.model3.json');
+ const definition=await fetch(modelUrl).then(r=>{if(!r.ok)throw Error('Model definition unavailable');return r.json()});
+ const references=definition.FileReferences||{};
  window.asterStage='loading model and textures';
  let model;
  await new Promise((resolve,reject)=>{
-  model=PIXI.live2d.Live2DModel.fromSync('model/'+encodeURIComponent('弄玉.model3.json'),{autoInteract:false,autoUpdate:false,onLoad:resolve,onError:reject});
+  model=PIXI.live2d.Live2DModel.fromSync(modelUrl,{autoInteract:false,autoUpdate:false,onLoad:resolve,onError:reject});
   model.on('modelLoaded',()=>{window.asterLoading.rig=true});
  });
  window.asterStage='positioning model';
  app.stage.addChild(model);
+
+ // ---- Framing --------------------------------------------------------------------------------
+ // The tuned default: a 420x620 canvas, 2.70x the full-body fit, with the face anchor (19% down the
+ // model) at 44% of the canvas height. Taller panes show more of her (up to about half the body);
+ // wider or shorter panes stay a bust. The top of her hair keeps the same headroom throughout.
  model.scale.set(1);model.position.set(0,0);
- const measured=model.getBounds();const raw={width:measured.width,height:measured.height};const scale=Math.min(W/raw.width,H/raw.height)*2.70;
- model.scale.set(scale);const box=model.getBounds();
- model.x+=W/2-(box.x+box.width/2);model.y+=H*.44-(box.y+box.height*.19);
- const core=model.internalModel.coreModel;
- let t=0,state='idle',mood='neutral',tap=0,look=0,frame=0;
- const put=(id,v)=>{try{core.setParameterValueById(id,v)}catch(_){}};
- model.internalModel.on('beforeModelUpdate',()=>{
-  const blinkPhase=t%4.7;const blink=blinkPhase>4.48?Math.abs((blinkPhase-4.59)/.11):1;
-  const attentive=state==='listening'||state==='waiting',thinking=state==='thinking'||state==='reading'||state==='checking',speaking=state==='speaking';
-  const sway=Math.sin(t*.8)*.8;
-  put('ParamAngleX',sway+(thinking?-6:0)+(state==='working'?-3:0)+(look>t?-5:0));
-  put('ParamAngleY',Math.sin(t*.6)*.6+(attentive?2:0)+(tap>t?Math.sin((tap-t)*9)*3:0));
-  put('ParamAngleZ',thinking?-2:0);put('ParamBodyAngleX',sway*.3);
-  put('ParamEyeBallX',thinking?-.3:(look>t?-.25:0));put('ParamEyeBallY',state==='reading'?-.18:(thinking?.12:0));
-  put('ParamEyeLOpen',Math.max(0,Math.min(state==='concerned'?.7:1,blink)));put('ParamEyeROpen',Math.max(0,Math.min(state==='concerned'?.7:1,blink)));
-  put('ParamBreath',.5+Math.sin(t*1.3)*.5);
-  put('ParamMouthOpenY',speaking?Math.max(0,Math.sin(t*15)*.65+.25):0);
-  // This rig's mouth-form/brow deformers are asymmetric. Keep their neutral values.
-  put('ParamEyeLSmile',mood==='happy'||state==='pleased'?.45:0);put('ParamEyeRSmile',mood==='happy'||state==='pleased'?.45:0);
-  put('ParamHeartEye',mood==='heart'?1:0);
-  put('ParamTeers3',mood==='heart'||mood==='angry'?1:0);
-  put('ParamTeers5',mood==='angry'?1:0);put('ParamTeers2',mood==='angry'?1:0);
- });
- window.asterFrame=(next,dt=100)=>{
-  state=next.state||'idle';mood=next.mood||'neutral';
-  if(next.tap)tap=t+1.1;if(next.look)look=t+2;
-  t+=Math.min(250,dt)/1000;model.update(Math.min(250,dt));app.renderer.render(app.stage);frame++;
-  return {png:canvas.toDataURL('image/png').split(',')[1],frame,state,mood,time:t};
+ const measured=model.getBounds();
+ const raw={x:measured.x,y:measured.y,width:measured.width,height:measured.height};
+ const FACE=.19,FACE_Y=.44,ZOOM=2.70,REF_ASPECT=REF_W/REF_H;
+ const refFraction=REF_H/(Math.min(REF_W/raw.width,REF_H/raw.height)*ZOOM*raw.height);
+ const headroom=FACE-FACE_Y*refFraction;
+ let framing={},framingChanged=true;
+ const frameModel=()=>{
+  const aspect=W/H;
+  const fraction=aspect<REF_ASPECT
+   ?Math.min(Math.max(refFraction,.55),refFraction*REF_ASPECT/aspect)
+   :Math.max(refFraction*.8,refFraction*Math.pow(REF_ASPECT/aspect,.3));
+  const scale=H/(fraction*raw.height);
+  const anchor=Math.min(.5,Math.max(.28,(FACE-headroom)/fraction));
+  model.scale.set(scale);
+  model.x=W/2-scale*(raw.x+raw.width/2);
+  model.y=H*anchor-scale*(raw.y+raw.height*FACE);
+  framing={width:W,height:H,visible_fraction:Math.round(fraction*1000)/1000,face_at:Math.round(anchor*1000)/1000};
  };
- window.asterInfo={model:'弄玉',renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings,width:W,height:H,raw:{width:raw.width,height:raw.height}};
- window.asterFrame({state:'idle'});window.asterReady=true;window.asterStage='ready';
+ const resize=(width,height)=>{
+  const w=Math.round(Math.min(MAX_SIDE,Math.max(MIN_SIDE,Number(width)||W)));
+  const h=Math.round(Math.min(MAX_SIDE,Math.max(MIN_SIDE,Number(height)||H)));
+  if(w===W&&h===H)return;
+  W=w;H=h;app.renderer.resize(W,H);frameModel();framingChanged=true;
+ };
+ frameModel();
+
+ // ---- Parameters -----------------------------------------------------------------------------
+ const internal=model.internalModel,core=internal.coreModel;
+ const call=(name,...args)=>{try{return typeof core[name]==='function'?core[name](...args):undefined}catch(_){return undefined}};
+ let parameterIds=null;
+ try{const m=core.getModel&&core.getModel();if(m&&m.parameters&&m.parameters.ids)parameterIds=Array.from(m.parameters.ids)}catch(_){}
+ const parameterCount=Number(call('getParameterCount'))||(parameterIds?parameterIds.length:Infinity);
+ // The Cubism framework hands out an index even for ids the rig lacks, so bound it by the real count.
+ const indexOf=id=>{if(parameterIds)return parameterIds.indexOf(id);const i=call('getParameterIndex',id);return typeof i==='number'&&i>=0&&i<parameterCount?i:-1};
+ const has=id=>indexOf(id)>=0;
+ const group=name=>(((definition.Groups||[]).find(g=>g&&g.Name===name&&g.Target==='Parameter')||{}).Ids||[]).filter(has);
+ // mode add: final = base + (ours - default), so an artist motion underneath blends instead of fighting.
+ // mode mul: eyelids multiply, so a motion or expression that narrows her eyes still blinks.
+ const SPEC={
+  ParamAngleX:['add',-30,30,0],ParamAngleY:['add',-30,30,0],ParamAngleZ:['add',-30,30,0],ParamBodyAngleX:['add',-10,10,0],
+  ParamEyeBallX:['add',-1,1,0],ParamEyeBallY:['add',-1,1,0],ParamEyeLOpen:['mul',0,1,1],ParamEyeROpen:['mul',0,1,1],
+  ParamBreath:['add',0,1,0],ParamMouthOpenY:['add',0,1,0],ParamEyeLSmile:['add',0,1,0],ParamEyeRSmile:['add',0,1,0],
+  ParamHeartEye:['add',0,1,0],ParamTeers2:['add',0,1,0],ParamTeers3:['add',0,1,0],ParamTeers5:['add',0,1,0],
+ };
+ // This rig's mouth-form/brow deformers are asymmetric. Keep their neutral values: never drive them.
+ const eyeIds=['ParamEyeLOpen','ParamEyeROpen'].filter(has);if(!eyeIds.length)eyeIds.push(...group('EyeBlink'));
+ const mouthIds=['ParamMouthOpenY'].filter(has);if(!mouthIds.length)mouthIds.push(...group('LipSync'));
+ const driven=[],missing=[];
+ const number=(v,fallback)=>typeof v==='number'&&isFinite(v)?v:fallback;
+ const register=(id,spec)=>{
+  if(driven.some(p=>p.id===id))return;
+  const i=indexOf(id);if(i<0){missing.push(id);return}
+  const min=number(call('getParameterMinimumValue',i),spec[1]),max=number(call('getParameterMaximumValue',i),spec[2]);
+  const def=number(call('getParameterDefaultValue',i),spec[3]);
+  driven.push({id,i,mode:spec[0],min,max,def,out:def});
+ };
+ for(const [id,spec] of Object.entries(SPEC))register(id,spec);
+ for(const id of eyeIds)register(id,['mul',0,1,1]);
+ for(const id of mouthIds)register(id,['add',0,1,0]);
+ const drives=id=>driven.some(p=>p.id===id);
+ const write=(p,v)=>call('setParameterValueByIndex',p.i,Math.min(p.max,Math.max(p.min,v)));
+ const read=p=>number(call('getParameterValueByIndex',p.i),p.def);
+ const resetLayer=()=>{for(const p of driven)write(p,p.def)};
+ const applyLayer=()=>{for(const p of driven){const base=read(p);write(p,p.mode==='mul'?base*p.out:base+p.out-p.def)}};
+ // Our own blink and breathing replace the SDK's fixed-rhythm versions of the same parameters.
+ const quiet={updateParameters(){}};
+ if(internal.eyeBlink&&eyeIds.some(drives))internal.eyeBlink=quiet;
+ if(internal.breath&&['ParamAngleX','ParamAngleY','ParamBreath'].some(drives))internal.breath=quiet;
+ // Apply after motions and before physics, so hair and accessories follow her head. Older builds
+ // without the motion events fall back to the pre-render hook.
+ let hook='beforeModelUpdate',applied=false;
+ internal.on('beforeMotionUpdate',resetLayer);
+ internal.on('afterMotionUpdate',()=>{hook='afterMotionUpdate';applyLayer();applied=true});
+ internal.on('beforeModelUpdate',()=>{if(!applied)applyLayer();applied=false});
+
+ // ---- Motions and expressions declared by the model -------------------------------------------
+ const mm=internal.motionManager||{};
+ const motionDefs=references.Motions||{};
+ const motionGroups=Object.keys(motionDefs).filter(g=>Array.isArray(motionDefs[g])&&motionDefs[g].length);
+ const findGroup=(...patterns)=>{for(const re of patterns){const g=motionGroups.find(name=>re.test(name));if(g)return g}return null};
+ const idleGroup=findGroup(/^idle/i,/idle/i),tapGroup=findGroup(/^tap/i,/tap/i);
+ // Idle motions are played occasionally by us, not back to back by the library.
+ if(idleGroup&&mm.groups)mm.groups.idle='\u0000aster-scheduled-idle';
+ const motionPlaying=()=>!!mm.playing;
+ const play=(name,priority)=>{try{Promise.resolve(model.motion(name,undefined,priority)).catch(asterWarn)}catch(e){asterWarn(e)}};
+ const expressions=(references.Expressions||[]).map((e,index)=>({name:String(e&&(e.Name||e.File)||index),index}));
+ const MOOD_WORDS={happy:['happy','smile','joy'],heart:['heart','love'],angry:['angry','anger','mad'],neutral:['neutral','normal','default']};
+ const expressionFor=m=>{for(const word of MOOD_WORDS[m]||[m]){const e=expressions.find(e=>e.name.toLowerCase().includes(word));if(e)return e}return null};
+ let moodExpression=null;
+
+ // ---- Motion system --------------------------------------------------------------------------
+ const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+ const rnd=(a,b)=>a+Math.random()*(b-a);
+ // Critically damped spring: continuous velocity, no overshoot, exact for any frame time.
+ class Spring{
+  constructor(x,w){this.x=x;this.v=0;this.w=w}
+  step(target,dt){const w=this.w,d=this.x-target,e=Math.exp(-w*dt),k=(this.v+w*d)*dt;this.v=(this.v-w*k)*e;this.x=target+(d+k)*e;return this.x}
+ }
+ // Layered 1-D gradient noise: slow drift that never repeats like a pure sine.
+ const noise=(()=>{
+  const g=Array.from({length:256},()=>Math.random()*2-1);
+  const n=x=>{const i=Math.floor(x),f=x-i,u=f*f*f*(f*(f*6-15)+10),a=g[i&255]*f,b=g[(i+1)&255]*(f-1);return 2*(a+(b-a)*u)};
+  return (x,seed)=>n(x+seed)*.62+n(x*2.03+seed*1.7+31.4)*.26+n(x*4.11+seed*2.3+77.7)*.12;
+ })();
+ // gaze: eye units (-1..1, negative X is toward the conversation on her left of the screen, positive Y is up)
+ // head: extra head pose [x,y,z] in degrees; lid: resting eyelid opening; sway: idle motion amount.
+ const STATES={
+  idle:{gaze:[0,0],head:[0,0,0],wander:.2,sway:1,lid:1,saccade:[.9,2.5],breath:3.6},
+  listening:{gaze:[0,.04],head:[0,2,1.5],wander:.07,sway:.7,lid:1,saccade:[.6,1.8],breath:3.4},
+  waiting:{gaze:[0,.02],head:[0,1.5,2.5],wander:.1,sway:.8,lid:1,saccade:[.7,2.2],breath:3.6},
+  thinking:{gaze:[-.48,.42],head:[0,1,-2.5],wander:.1,sway:.55,lid:.82,saccade:[1.2,2.5],breath:4.2},
+  reading:{gaze:[-.55,-.32],head:[0,-2,-1],wander:.05,sway:.45,lid:.9,saccade:[.25,.5],breath:3.9,scan:true},
+  checking:{gaze:[-.5,-.28],head:[0,-1.5,0],wander:.05,sway:.45,lid:.92,saccade:[.3,.7],breath:3.9,scan:true},
+  working:{gaze:[-.38,-.22],head:[0,-2,0],wander:.12,sway:.55,lid:.95,saccade:[.6,1.6],breath:3.8},
+  speaking:{gaze:[0,.03],head:[0,1,0],wander:.08,sway:1.1,lid:1,saccade:[.6,2],breath:3.0},
+  pleased:{gaze:[0,.06],head:[0,2,4],wander:.08,sway:.9,lid:1,saccade:[.8,2.2],breath:3.4,smile:.45},
+  concerned:{gaze:[.04,-.22],head:[0,-3,-3],wander:.08,sway:.5,lid:.74,saccade:[.8,2.2],breath:3.3},
+ };
+ const CALM=new Set(['idle','listening','waiting','pleased']);
+ const MOODS=new Set(['happy','heart','angry','neutral']);
+ const S={
+  attX:new Spring(0,9),attY:new Spring(0,9),turnX:new Spring(0,4.5),turnY:new Spring(0,4.5),
+  biasX:new Spring(0,2.5),biasY:new Spring(0,2.5),biasZ:new Spring(0,2.5),nod:new Spring(0,6),tilt:new Spring(0,6),
+  eyeX:new Spring(0,16),eyeY:new Spring(0,16),lid:new Spring(1,5),sway:new Spring(1,1.2),
+  smile:new Spring(0,5),heart:new Spring(0,5),blush:new Spring(0,4),angry:new Spring(0,5),
+ };
+ let t=0,state='idle',mood='neutral',speech=0,lookUntil=-1,thinkSide=-1,lastGaze=[0,0];
+ let offset=[0,0],glance=[0,0],glanceUntil=0,nextSaccade=.5,scan=-.16,line=0;
+ let breathPhase=Math.random()*Math.PI*2,tapSmileUntil=-1,lastNod=-9,lastTapMotion=-9,nextIdleMotion=rnd(6,14);
+ const blink={phase:'open',at:0,next:rnd(1.2,3.5),second:false,shown:false,shownAt:0};
+ const CLOSE=.07,HOLD=.03,OPEN=.13;
+ // 0 = open, 1 = shut. Fast accelerating close, slower easing open; the shut pose is always drawn once.
+ const blinkStep=()=>{
+  if(blink.phase==='open'){if(t<blink.next)return 0;blink.phase='closing';blink.at=blink.next}
+  if(blink.phase==='closing'){const p=(t-blink.at)/CLOSE;if(p<1)return p*p;blink.phase='closed';blink.at+=CLOSE;blink.shown=false}
+  if(blink.phase==='closed'){
+   if(!blink.shown){blink.shown=true;blink.shownAt=t;return 1}
+   if(t-blink.at<HOLD)return 1;
+   blink.phase='opening';blink.at=Math.max(blink.at+HOLD,blink.shownAt);
+  }
+  const p=(t-blink.at)/OPEN;if(p<1)return (1-p)*(1-p);
+  blink.phase='open';
+  if(!blink.second&&Math.random()<.15){blink.second=true;blink.next=t+rnd(.08,.18)}else{blink.second=false;blink.next=t+rnd(2,6)}
+  return 0;
+ };
+ const blinkSoon=(chance,within)=>{if(blink.phase==='open'&&Math.random()<chance)blink.next=Math.min(blink.next,t+rnd(0,within))};
+ // Speech: syllable-like pulses of random length and strength, short closures between them, and a
+ // smooth close once the text stops. Energy comes from the recent characters-per-second of the reply.
+ const lips={v:0,active:false,start:0,dur:0,amp:0,rest:0};
+ const lipsStep=dt=>{
+  const energy=speech>0?1-Math.exp(-speech/24):0;
+  const shape=()=>lips.amp*Math.pow(Math.max(0,Math.sin(Math.PI*(t-lips.start)/lips.dur)),.7);
+  let target=0;
+  if(lips.active){
+   if(t-lips.start>=lips.dur){lips.active=false;const r=Math.random();lips.rest=t+(r<.15?rnd(.12,.26):r<.75?rnd(.03,.08):0)}
+   else target=shape();
+  }
+  if(!lips.active&&energy>.04&&t>=lips.rest){
+   lips.active=true;lips.dur=rnd(.09,.18);lips.start=t-lips.dur*rnd(.2,.5);
+   lips.amp=Math.min(1,energy*rnd(.45,1)*(Math.random()<.18?1.3:1));target=shape();
+  }
+  const tau=target>lips.v?.03:(energy>0?.05:.09);
+  lips.v+=(target-lips.v)*(1-Math.exp(-dt/tau));
+  if(energy===0&&!lips.active&&lips.v<.01)lips.v=0;
+  return lips.v;
+ };
+ const saccade=looking=>{
+  const cfg=STATES[state];nextSaccade=t+rnd(cfg.saccade[0],cfg.saccade[1]);
+  if(cfg.scan&&!looking){ // reading: short hops along a line, then a return sweep to the next
+   scan+=rnd(.06,.11);if(scan>.16){scan=-.16;line=(line+1)%4}
+   offset=[scan,-.05*line+rnd(-.015,.015)];return;
+  }
+  const w=looking?.04:cfg.wander;offset=[rnd(-w,w),rnd(-w,w)*.6];
+  if(!looking&&state==='idle'&&Math.random()<.12){glance=[rnd(-.5,.5),rnd(-.2,.3)];glanceUntil=t+rnd(.8,1.6)}
+ };
+ const setState=next=>{
+  state=next;glance=[0,0];
+  if(next==='thinking')thinkSide=Math.random()<.7?-1:1;
+  if(STATES[next].scan){scan=-.16-rnd(0,.05);line=0}
+  nextSaccade=Math.min(nextSaccade,t+rnd(.05,.25));
+ };
+ const setMood=next=>{
+  mood=next;const e=expressionFor(next);
+  if(e){
+   moodExpression=e.name;
+   try{Promise.resolve(model.expression(e.index)).then(ok=>{if(ok===false&&moodExpression===e.name)moodExpression=null},err=>{asterWarn(err);if(moodExpression===e.name)moodExpression=null})}
+   catch(err){asterWarn(err);moodExpression=null}
+  }else if(moodExpression!==null){
+   moodExpression=null;
+   try{mm.expressionManager&&mm.expressionManager.resetExpression()}catch(err){asterWarn(err)}
+  }
+ };
+ const react=()=>{ // a tap: a small nod, a brief smile, maybe a blink and the rig's own tap motion
+  if(t-lastNod>1.2){S.nod.v-=55;S.tilt.v+=rnd(-18,18);lastNod=t}
+  tapSmileUntil=t+.8;blinkSoon(.5,.2);
+  if(tapGroup&&t-lastTapMotion>4){lastTapMotion=t;play(tapGroup,2)}
+ };
+ const input=next=>{
+  const s=STATES[next.state]?next.state:'idle';if(s!==state)setState(s);
+  const m=MOODS.has(next.mood)?next.mood:'neutral';if(m!==mood)setMood(m);
+  if(next.tap)react();
+  if(next.look){lookUntil=t+2;nextSaccade=t}
+  speech=Math.max(0,Number(next.speech)||0);
+ };
+ const values={};
+ const animate=dt=>{
+  const cfg=STATES[state],looking=t<lookUntil;
+  let gx=cfg.gaze[0]*(state==='thinking'?thinkSide:1),gy=cfg.gaze[1];
+  if(looking){gx=0;gy=.05}
+  if(Math.hypot(gx-lastGaze[0],gy-lastGaze[1])>.3)blinkSoon(.6,.06); // big gaze shifts often carry a blink
+  lastGaze=[gx,gy];
+  if(t>=nextSaccade)saccade(looking);
+  if(t>=glanceUntil||looking)glance=[0,0];
+  const tx=clamp(gx+glance[0]+offset[0],-1,1),ty=clamp(gy+glance[1]+offset[1],-1,1);
+  // Eyes lead; attention and then the head follow with lag, and the eyes settle back as the head turns.
+  const ax=S.attX.step(tx,dt),ay=S.attY.step(ty,dt);
+  const turnX=S.turnX.step(ax*12,dt),turnY=S.turnY.step(ay*8,dt);
+  const head=looking?[0,1.5,3]:cfg.head;
+  const bx=S.biasX.step(head[0],dt),by=S.biasY.step(head[1],dt),bz=S.biasZ.step(head[2],dt);
+  const nod=S.nod.step(0,dt),tilt=S.tilt.step(0,dt);
+  const ex=S.eyeX.step(clamp(tx-turnX/40,-1,1),dt),ey=S.eyeY.step(clamp(ty-turnY/28,-1,1),dt);
+  const amp=S.sway.step(cfg.sway,dt);
+  const sx=noise(t*.23,11)*3.2*amp,sy=noise(t*.19,37)*1.8*amp,sz=noise(t*.21,73)*2.4*amp,sb=noise(t*.13,97)*2.6*amp;
+  breathPhase+=dt*2*Math.PI/cfg.breath*(1+noise(t*.1,131)*.08);
+  const breath=.5+.5*Math.sin(breathPhase);
+  const talk=lipsStep(dt);
+  values.ParamAngleX=bx+turnX+sx;
+  values.ParamAngleY=by+turnY+sy+nod+(breath-.5)*.8+talk*1.6;
+  values.ParamAngleZ=bz+sz+tilt-ax*ay*6;
+  values.ParamBodyAngleX=sb+turnX*.22;
+  values.ParamEyeBallX=ex;values.ParamEyeBallY=ey;
+  values.ParamBreath=breath;
+  const open=Math.max(0,S.lid.step(looking?1:cfg.lid,dt)*(1-blinkStep()));
+  for(const id of eyeIds)values[id]=open;
+  for(const id of mouthIds)values[id]=talk;
+  // Mood uses a matching model expression when the rig declares one, otherwise these parameters.
+  const byParams=moodExpression===null;
+  const smile=S.smile.step(Math.max(byParams&&mood==='happy'?.45:0,cfg.smile||0,t<tapSmileUntil?.25:0),dt);
+  values.ParamEyeLSmile=values.ParamEyeRSmile=smile;
+  values.ParamHeartEye=S.heart.step(byParams&&mood==='heart'?1:0,dt);
+  values.ParamTeers3=S.blush.step(byParams&&(mood==='heart'||mood==='angry')?1:0,dt);
+  values.ParamTeers5=values.ParamTeers2=S.angry.step(byParams&&mood==='angry'?1:0,dt);
+  for(const p of driven)p.out=number(values[p.id],p.def);
+  if(idleGroup&&CALM.has(state)&&!motionPlaying()&&t>=nextIdleMotion){nextIdleMotion=t+rnd(14,30);play(idleGroup,1)}
+ };
+ setMood('neutral');
+ let frame=0,reportedWarnings=0;
+ window.asterFrame=(next={},dt=100)=>{
+  const started=performance.now();
+  if(Array.isArray(next.view))resize(next.view[0],next.view[1]);
+  input(next);
+  const step=Math.min(250,Math.max(0,Number(dt)||0))/1000;
+  t+=step;animate(step);
+  model.update(step*1000);app.renderer.render(app.stage);frame++;
+  const jpeg=next.format==='jpeg';
+  const url=canvas.toDataURL(jpeg?'image/jpeg':'image/png',.9);
+  const result={data:url.slice(url.indexOf(',')+1),format:jpeg?'jpeg':'png',width:canvas.width,height:canvas.height,frame,state,mood,
+   ms:Math.round((performance.now()-started)*10)/10,motion:motionPlaying(),expression:moodExpression};
+  const warnings=window.asterLoading.warnings;
+  if(framingChanged){framingChanged=false;result.framing=framing}
+  if(warnings.length!==reportedWarnings){reportedWarnings=warnings.length;result.warnings=warnings.slice(-8)}
+  return result;
+ };
+ window.asterFrame({state:'idle'});
+ window.asterInfo={model:'弄玉',renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings.slice(),
+  width:W,height:H,raw:{width:raw.width,height:raw.height},framing,
+  parameters_driven:driven.map(p=>p.id),parameters_missing:missing,layer_hook:hook,
+  motions:Object.fromEntries(motionGroups.map(g=>[g,motionDefs[g].length])),idle_motion_group:idleGroup,tap_motion_group:tapGroup,
+  expressions:expressions.map(e=>e.name)};
+ window.asterReady=true;window.asterStage='ready';
 })().catch(e=>{window.asterError=String(e&&e.message||e)});
 </script>

@@ -353,7 +353,7 @@ impl App {
         let companion = if cli.no_live2d || graphics == Graphics::Off {
             None
         } else {
-            Some(Companion::start(cfg.clone()))
+            Some(Companion::start(cfg.clone(), graphics))
         };
         Ok(Self {
             cfg,
@@ -641,7 +641,7 @@ impl App {
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
    "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
-   "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
+   "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 active seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
    "/stop"=>self.stop(),
@@ -2386,7 +2386,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 write!(
                     io::stdout(),
                     "{}",
-                    app.graphics.encode(&frame.png, app.image_area)
+                    app.graphics.encode(frame, app.image_area)
                 )?;
                 io::stdout().flush()?;
                 app.last_image = Some((frame.sequence, app.image_area));
@@ -2641,12 +2641,13 @@ pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()
         use base64::Engine;
         let r = app.image_area;
         svg += &format!(
-            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" href=\"data:image/png;base64,{}\"/>",
+            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" href=\"data:{};base64,{}\"/>",
             r.x as usize * cw,
             r.y as usize * ch,
             r.width as usize * cw,
             r.height as usize * ch,
-            base64::engine::general_purpose::STANDARD.encode(&frame.png)
+            frame.format.mime(),
+            base64::engine::general_purpose::STANDARD.encode(&frame.data)
         );
     }
     svg += "</svg>";

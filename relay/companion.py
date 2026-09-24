@@ -30,4 +30,4 @@ def portrait(path: str, width=24):
                                         bgcolor=Color.from_rgb(*image.getpixel((x, y + 1)))))
         return lines
     except (OSError, ValueError):
-        return Text("       ◇\n   relay companion", style="#b7c994")
+        return Text("       ◇\n   aster companion", style="#b7c994")

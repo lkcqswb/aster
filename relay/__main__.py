@@ -13,12 +13,12 @@ def main():
     os.umask(0o077)
     project = Path(__file__).resolve().parent.parent
     load_env(project / ".env")
-    parser = argparse.ArgumentParser(description="Relay — an observable local agent harness")
+    parser = argparse.ArgumentParser(prog="aster", description="Aster — an observable local agent harness")
     parser.add_argument("--data-dir", type=Path, default=project / ".relay" / "runs")
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve", help="Open the local dashboard")
     serve.add_argument("--port", type=int, default=8787)
-    tui = sub.add_parser("tui", help="Open the terminal workbench")
+    tui = sub.add_parser("tui", prog="aster", help="Open the Aster terminal workbench")
     tui.add_argument("--connect", help="Attach to a running local dashboard, e.g. http://127.0.0.1:8787")
     tui.add_argument("--no-companion", action="store_true", help="Hide the terminal portrait")
     tui.add_argument("--companion", type=Path, help="Use a local portrait image")
@@ -36,11 +36,11 @@ def main():
     args = parser.parse_args()
     if args.command == "tui":
         if not sys.stdin.isatty() or not sys.stdout.isatty():
-            parser.error("The TUI needs an interactive terminal. Launch ./relay-tui in a terminal window.")
+            parser.error("The TUI needs an interactive terminal. Launch ./aster in a terminal window.")
         try:
             from .tui import run_terminal
         except ModuleNotFoundError:
-            parser.error("Install terminal dependencies with .venv/bin/python -m pip install -r requirements-tui.txt, then use ./relay-tui.")
+            parser.error("Install terminal dependencies with .venv/bin/python -m pip install -r requirements-tui.txt, then use ./aster.")
         from .tui_backend import make_backend
         try:
             backend = make_backend(args.data_dir, args.connect)
@@ -55,7 +55,7 @@ def main():
         parser.error(str(exc))
     if args.command == "serve":
         server = make_server(engine, args.port)
-        print(f"Relay is ready at http://127.0.0.1:{server.server_port}", flush=True)
+        print(f"Aster is ready at http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

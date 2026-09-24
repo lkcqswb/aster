@@ -1,4 +1,4 @@
-# Relay
+# Aster
 
 A small local agent harness: **task → model → tools → independent checks**.
 
@@ -11,10 +11,18 @@ From the project directory, install the terminal dependencies and launch:
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-tui.txt
-./relay-tui
+./aster
 ```
 
 For live MiniMax tasks, copy `.env.example` to `.env`, replace the placeholder with your API key, and run `chmod 600 .env`. Choose the scripted demo to try the workbench without a key. The private `.env` file is excluded from Git.
+
+To launch with `aster` from any directory, add this function to `~/.zshrc`, using your checkout's absolute path, then run `source ~/.zshrc`:
+
+```sh
+aster() { "/absolute/path/to/aster/aster" "$@"; }
+```
+
+The internal Python package and saved-data directory remain `relay` and `.relay` for compatibility with existing runs.
 
 The workbench uses a charcoal-and-sage palette, a live execution timeline, a file browser, independent checks, checkpoint branching, and local JSON export. It adapts to an 80×24 terminal; the history sidebar and companion appear when space permits. Terminal `NO_COLOR` preferences are respected.
 
@@ -35,12 +43,12 @@ The workbench uses a charcoal-and-sage palette, a live execution timeline, a fil
 The TUI opens the same saved run directory as the dashboard. If that directory is already served on port 8787, it attaches after verifying the workspace identity. You can also connect explicitly:
 
 ```sh
-./relay-tui --connect http://127.0.0.1:8787
-./relay-tui --provider demo --no-companion
+./aster --connect http://127.0.0.1:8787
+./aster --provider demo --no-companion
 .venv/bin/python -m relay --data-dir /tmp/relay-tui-test tui
 ```
 
-**Companion:** Relay reads the portrait bundled with the user's existing Live2D model at `~/desktop-pet/assets/弄玉运行档_无水印/3icon.png` and renders it with colored terminal half blocks. It does not modify the desktop pet, redistribute its assets, or run Live2D animation in the terminal. Use `--companion /path/to/image.png` for another local portrait; a text mascot appears if the image is unavailable.
+**Companion:** Aster reads the portrait bundled with the user's existing Live2D model at `~/desktop-pet/assets/弄玉运行档_无水印/3icon.png` and renders it with colored terminal half blocks. It does not modify the desktop pet, redistribute its assets, or run Live2D animation in the terminal. Use `--companion /path/to/image.png` for another local portrait; a text mascot appears if the image is unavailable.
 
 **Custom tasks:** choose “Custom task / manifest” in New run. Enter an instruction, or supply a task JSON file such as `examples/custom-task.json`. A manifest defines starting files and success checks. A prompt without checks gets an **unverified** result rather than a passing grade.
 
@@ -84,7 +92,7 @@ python3 -m relay run --provider minimax --task-file examples/custom-task.json
 python3 -m unittest discover -s tests -v
 ```
 
-Relay locks its data directory to prevent two processes from interfering with the same runs. To run a CLI experiment while the dashboard is open, choose a separate directory:
+Aster locks its data directory to prevent two processes from interfering with the same runs. To run a CLI experiment while the dashboard is open, choose a separate directory:
 
 ```sh
 python3 -m relay --data-dir /tmp/relay-experiment run --provider demo
@@ -102,7 +110,7 @@ python3 -m relay --data-dir /tmp/relay-experiment run --provider demo
 
 The default caps are 12 model turns, 24 tool calls, 180 seconds, 2,048 output tokens per call, and 12,000 output tokens per run. The next request's output allowance is reduced to the remaining budget. Provider usage is recorded, including separately reported cache tokens. These controls are **not a currency spending cap**; input tokens also incur usage and token-plan accounting can differ.
 
-Cancellation/deadline checks stop new tool actions. An already submitted API request may finish and consume tokens after local cancellation; Relay discards its result. HTTP errors, invalid responses, and truncated output end the run without automatic retries. Failed tool calls can be corrected by the agent on a later turn within the same limits.
+Cancellation/deadline checks stop new tool actions. An already submitted API request may finish and consume tokens after local cancellation; Aster discards its result. HTTP errors, invalid responses, and truncated output end the run without automatic retries. Failed tool calls can be corrected by the agent on a later turn within the same limits.
 
 Tools: `list_files`, `read_file`, `write_file`, and a restricted arithmetic `calculate`. No shell, Python execution, arbitrary network access, or access to your existing project directories is offered to the model. File operations reject parent traversal and paths that resolve outside the run workspace. Each UTF-8 file is limited to 64 KB; the workspace is limited to 100 files / 1 MB.
 

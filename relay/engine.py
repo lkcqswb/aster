@@ -44,7 +44,7 @@ class Engine:
             fcntl.flock(self._lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self._lock_handle.close()
-            raise ValueError("This data directory is already open in another Relay process. Use a different --data-dir.") from None
+            raise ValueError("This data directory is already open in another Aster process. Use a different --data-dir.") from None
         self.lock = threading.RLock()
         self.cancel_event = threading.Event()
         self.active = None
@@ -147,7 +147,7 @@ class Engine:
             provider = self.provider_factory(provider_name, model) if self.provider_factory else (
                 DemoProvider() if provider_name == "demo" else MiniMaxProvider(model))
             if isinstance(provider, MiniMaxProvider) and not provider.key and not self.provider_factory:
-                raise ValueError("Configure ANTHROPIC_AUTH_TOKEN in .env, then restart Relay.")
+                raise ValueError("Configure ANTHROPIC_AUTH_TOKEN in .env, then restart Aster.")
             run_id = uuid.uuid4().hex[:12]
             path = self.root / run_id
             (path / "workspace").mkdir(parents=True)

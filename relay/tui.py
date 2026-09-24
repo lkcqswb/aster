@@ -1,4 +1,4 @@
-"""Relay's keyboard-first terminal workbench."""
+"""Aster's keyboard-first terminal workbench."""
 import asyncio
 import json
 import os
@@ -200,7 +200,7 @@ class QuitRun(ModalScreen):
 
 
 class RelayTUI(App):
-    TITLE = "Relay"
+    TITLE = "Aster"
     SUB_TITLE = "Agent workbench"
     CSS_PATH = "terminal.tcss"
     ENABLE_COMMAND_PALETTE = True
@@ -231,7 +231,7 @@ class RelayTUI(App):
 
     def compose(self):
         with Horizontal(id="topbar"):
-            yield Static("↗  relay", id="brand")
+            yield Static("↗  aster", id="brand")
             yield Static("TERMINAL WORKBENCH", id="wordmark")
             yield Static("connecting…", id="connection")
         with Horizontal(id="body"):
@@ -268,10 +268,10 @@ class RelayTUI(App):
         yield Footer()
 
     async def on_mount(self):
-        self.register_theme(Theme(name="relay", primary=SAGE, secondary="#91a87f", accent=SAGE,
+        self.register_theme(Theme(name="aster", primary=SAGE, secondary="#91a87f", accent=SAGE,
                                   foreground=INK, background="#101713", surface="#151c19", panel="#1c281f",
                                   success=SAGE, warning=GOLD, error=ROSE, dark=True))
-        self.theme = "relay"
+        self.theme = "aster"
         self.query_one("#portrait", Static).update(portrait(str(self.companion_path)))
         self.query_one("#companion-box").display = self.show_companion
         try:
@@ -280,9 +280,9 @@ class RelayTUI(App):
             self.query_one("#connection", Static).update(Text(f"{label}  /  {self.backend.mode}", style=SAGE))
             self.query_one("#timeline", RichLog).write(Panel(
                 Text("Every step. In the open.\n\nStart a task with n. The agent can read and write files,\n"
-                     "use tools, and leave a complete trace. Relay checks its\noutput against your original success criteria.\n\n"
+                     "use tools, and leave a complete trace. Aster checks its\noutput against your original success criteria.\n\n"
                      "Live model or scripted demo. Your choice.", style=MUTED),
-                title="WELCOME TO RELAY", border_style="#354338", padding=(2, 3)))
+                title="WELCOME TO ASTER", border_style="#354338", padding=(2, 3)))
             await self.refresh_data()
             self.set_interval(.6, self.tick)
         except Exception as exc:
@@ -495,7 +495,7 @@ class RelayTUI(App):
         try:
             run = await asyncio.to_thread(self.backend.get, self.current["id"])
             self.export_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            path = self.export_dir / f"relay-{run['id']}-{datetime.now():%Y%m%d-%H%M%S-%f}.json"
+            path = self.export_dir / f"aster-{run['id']}-{datetime.now():%Y%m%d-%H%M%S-%f}.json"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as handle: json.dump(run, handle, ensure_ascii=False, indent=2)
             self.last_export = path

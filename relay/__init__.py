@@ -1,3 +1,3 @@
-"""Relay: a small, observable agent harness."""
+"""Aster: a small, observable agent harness."""
 
 __version__ = "0.1.0"

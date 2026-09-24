@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+aster_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$aster_dir"
+if [ ! -x .venv/bin/python ]; then
+  printf '%s\n' 'Set up Aster first:' 'python3 -m venv .venv' '.venv/bin/python -m pip install -r requirements-tui.txt'
+  exit 1
+fi
+exec .venv/bin/python -m relay tui "$@"

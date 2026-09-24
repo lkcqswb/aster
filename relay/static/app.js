@@ -129,7 +129,7 @@ function updateForm() {
   if (custom) $('provider-select').value='minimax';
   const demo = $('provider-select').value==='demo';
   $('model-input').disabled=demo;
-  $('provider-hint').textContent = demo?'A deterministic script exercises real tools. It does not interpret custom instructions.':state.config.minimax_ready?'Connected through your local configuration. This run will call MiniMax.':'Add your MiniMax key to the private .env file and restart Relay.';
+  $('provider-hint').textContent = demo?'A deterministic script exercises real tools. It does not interpret custom instructions.':state.config.minimax_ready?'Connected through your local configuration. This run will call MiniMax.':'Add your MiniMax key to the private .env file and restart Aster.';
   $('launch-run').disabled = (!demo && !state.config.minimax_ready) || (custom && demo);
 }
 function showNewRun(taskId) {
@@ -178,7 +178,7 @@ $('run-form').addEventListener('submit',async event=>{
 });
 $('stop-run').addEventListener('click',async()=>{try{await api(`/api/runs/${state.selected}/cancel`,{});toast('Stopping this run…');await refresh();}catch(e){toast(e.message);}});
 $('export-run').addEventListener('click',async()=>{
-  try{const run=await api(`/api/runs/${state.selected}/export`);const url=URL.createObjectURL(new Blob([JSON.stringify(run,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=`relay-${run.id}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Trace exported.');}catch(e){toast(e.message);}
+  try{const run=await api(`/api/runs/${state.selected}/export`);const url=URL.createObjectURL(new Blob([JSON.stringify(run,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=`aster-${run.id}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Trace exported.');}catch(e){toast(e.message);}
 });
 $('replay-run').addEventListener('click',()=>{
   const run=state.run;if(!run)return;

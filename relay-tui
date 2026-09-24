@@ -1,9 +1,4 @@
 #!/bin/sh
 set -eu
 relay_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-cd "$relay_dir"
-if [ ! -x .venv/bin/python ]; then
-  printf '%s\n' 'Set up the terminal interface first:' 'python3 -m venv .venv' '.venv/bin/python -m pip install -r requirements-tui.txt'
-  exit 1
-fi
-exec .venv/bin/python -m relay tui "$@"
+exec "$relay_dir/aster" "$@"

@@ -39,6 +39,9 @@ pub struct Cli {
     #[arg(long, env = "ASTER_COMPANION_PROFILE")]
     /// Declarative Live2D model, emotion and motion profile (local JSON)
     pub companion_profile: Option<PathBuf>,
+    #[arg(long, env = "ASTER_COMPANION_QUERY", default_value = "on", value_parser = ["on", "off"])]
+    /// After each reply, ask the conversation's provider for 弄玉's emotion and motion (one small structured request, no retry)
+    pub companion_query: String,
     #[arg(long)]
     /// Validate a companion profile without loading model assets or a provider
     pub check_companion: Option<PathBuf>,

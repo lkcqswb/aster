@@ -44,4 +44,8 @@ Configurable runtime texture scaling with a 2048-pixel default, actual size diag
 
 Signal-aware shutdown, session checkpoints on interrupted work, and shared ownership of renderer/command process groups. Real terminal tests stop idle animation, an unanswered approval and a running command; a headless cancellation returns a failing exit status. Terminal restoration, child cleanup and private renderer profile removal are checked.
 
-Next: evidence-aware review across task steps and stronger project search.
+## Delivered in 0.9
+
+Check identities and edit revisions distinguish current failures, successful repairs, stale passes and earlier results. The companion uses that evidence for her reaction and status. F5 opens the underlying history beside her. Manual file checks update the same record and preserve valid tool/result pairs in the next model context without a model call.
+
+Next: stronger project search and larger source-file navigation.

@@ -113,6 +113,8 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/demo` | Run a scripted, real file-write and verification example |
 | `/status`, `/help`, `/stop`, `/quit` | Inspect, learn, interrupt, leave |
 
+**F5 /checks** opens the evidence behind 弄玉's reaction. A passing rerun of the same check resolves its earlier failure while preserving both outcomes. A different assertion cannot erase a failure. File-tool edits make previous passing checks stale; her card asks for a fresh check instead of celebrating. This tracks Aster's file edits, not arbitrary shell or external changes. `/check` runs locally and saves its actual result for the next model turn. Try `/demo evidence` and `/demo evidence stale` offline.
+
 While work runs, **Enter steers** and **Alt+Enter queues a follow-up**. **Ctrl+G** opens a direction box, including during a question or approval; Escape returns to the existing decision. Sending a correction cancels pending decisions and skips tool calls that have not started. An already-running command can finish; use Escape to stop it. 弄玉 acknowledges the new direction and her work card follows the updated task.
 
 The queue is saved with the conversation (up to eight messages / 32 KB). A normal finish advances it; a stop, error or restart leaves it waiting for `/next`. Forks start with an empty queue so the same pending work does not run in two conversations.

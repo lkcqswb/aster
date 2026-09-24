@@ -1,3 +1,14 @@
+# Evidence and companion review 0.9 — 2026-09-24
+
+- **50 Rust tests passed**, plus formatting, Clippy with warnings denied and release build. New cases cover failed-then-passing exact checks, weaker assertions that cannot erase a failure, stale passes after edits, later regressions, old session records, and valid provider pairs for manual checks.
+- The animated terminal workflow recorded a failure, repaired it, retained both results, made another edit, displayed the resulting stale check, and refreshed it with an exact local recheck. F5 history and narrow/wide resizing passed with **91 distinct frames** and exit 0. Evidence: `.aster/qa/evidence-e2e.json`. No API requests were made. The general session/approval/fork/export terminal regression also passed.
+- This test exposed an unnecessary cursor-position query during full-screen redraw: a missed reply ended Aster with a terminal error. Redraw now invalidates the full-screen buffer without that query. The regression explicitly rejects cursor queries and resizes while the checks panel is open.
+- The test driver now strips complete inline-image packets before parsing terminal text and waits for the full panel transition before sending the next command. Earlier attempts caught delayed input and a command sent during redraw; these are not counted as passing runs.
+- Evidence freshness covers Aster's file-tool edits. Arbitrary shell mutations and external file changes are not automatically detected; a passed command is evidence only for that command.
+- The actual checks panel and model were rendered and visually inspected. Evidence is presented as readable assertions/outcomes; original provider results remain in private session context.
+
+---
+
 # Shutdown and process ownership 0.8 — 2026-09-24
 
 - **45 Rust tests passed**, plus formatting, Clippy with warnings denied and the release build. The general keyboard/session/approval/fork/resize PTY regression passed.

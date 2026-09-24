@@ -491,12 +491,16 @@ fn turn_with_input(
                         )
                     }
                 })();
-                let (value, error) = match outcome {
+                let (mut value, error) = match outcome {
                     Ok(v) => (v, false),
                     Err(e) => (json!({"error":e.to_string(),"executed":executed}), true),
                 };
                 let _ = tx.send(Event::DecisionClosed);
                 s.work.record(name, args, &value, error);
+                if matches!(name, "write_file" | "edit_file" | "check_file" | "shell") {
+                    value["work_verdict"] = json!(s.work.verdict());
+                    value["checks_need_rerun"] = json!(s.work.has_stale_checks());
+                }
                 let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                 let subject = args["path"]
                     .as_str()
@@ -738,6 +742,35 @@ fn demo_response(
             .is_some_and(|r| r["passed"] == true);
         return Ok(
             json!({"content":[{"type":"text","text":if passed {"The command finished with exit 0. F4 shows the actual output."} else {"The command did not complete successfully. F4 shows the actual output; /recover starts a new investigation."}}],"stop_reason":"end_turn","usage":{}}),
+        );
+    }
+    if prompt.starts_with("evidence demo") {
+        let call = match turn {
+            0 => Some((
+                "write_file",
+                json!({"path":"evidence-demo.json","content":"{\"ready\":false}\n"}),
+            )),
+            1 | 3 => Some((
+                "check_file",
+                json!({"path":"evidence-demo.json","kind":"json_equals","expected":"{\"ready\":true}"}),
+            )),
+            2 => Some((
+                "edit_file",
+                json!({"path":"evidence-demo.json","old_text":"false","new_text":"true"}),
+            )),
+            4 if prompt.contains("stale") => Some((
+                "write_file",
+                json!({"path":"evidence-note.txt","content":"The project changed after its check. Rerun the check.\n"}),
+            )),
+            _ => None,
+        };
+        if let Some((name, input)) = call {
+            return Ok(
+                json!({"content":[{"type":"tool_use","id":format!("evidence-{turn}"),"name":name,"input":input}],"stop_reason":"tool_use","usage":{}}),
+            );
+        }
+        return Ok(
+            json!({"content":[{"type":"text","text":"The evidence demo is ready to inspect. F5 opens the original outcomes and their current status. This scripted demo uses real edits and checks."}],"stop_reason":"end_turn","usage":{}}),
         );
     }
     if prompt.contains("steering demo") {

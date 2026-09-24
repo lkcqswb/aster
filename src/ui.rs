@@ -60,6 +60,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/build", "Work with file and shell tools"),
     ("/permissions", "ask, allow, or deny actions"),
     ("/check", "Verify a file independently"),
+    ("/checks", "Inspect current checks and their history"),
     ("/run", "Run a local command without a model request"),
     ("/output", "Watch the latest command output"),
     ("/recover", "Ask for help with a failed command"),
@@ -364,6 +365,7 @@ impl App {
                 | "/pet"
                 | "/tools"
                 | "/work"
+                | "/checks"
                 | "/output"
                 | "/review"
                 | "/steer"
@@ -389,6 +391,7 @@ impl App {
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
    "/work"=>self.show_work(),
+   "/checks"=>self.info("Checks beside 弄玉",self.session.work.checks_summary()),
    "/run"=>{if arg.is_empty(){bail!("Use /run followed by a shell command")};self.submit(format!("/run {arg}"))?;},
    "/output"=>self.info("Command output · 弄玉",self.session.work.command.as_ref().map(|c|c.summary()).unwrap_or_else(||"No command has run in this turn.\nCommand output appears here while it runs.\nF4 opens this view.".into())),
    "/recover"=>{let command=self.session.work.command.as_ref().context("No failed command to recover")?;if command.running || (command.exit_code==Some(0)&&!command.stopped&&!command.timed_out){bail!("The latest command has not failed")};let prompt=format!("Help me recover from the latest command failure. Share a concise plan with update_plan. Inspect the actual output and relevant project files, explain the cause supported by evidence, then make a focused fix and run an appropriate check. Do not blindly repeat the same command. Respect my permission settings.\n\n{}",command.summary());self.submit(prompt)?;},
@@ -403,14 +406,15 @@ impl App {
    "/plan"=>{self.session.mode="plan".into();self.persist()?;self.notify("Plan mode · read and discuss, no writes or shell commands");},
    "/build"=>{self.session.mode="build".into();self.persist()?;self.notify("Build mode · tools follow your permission setting");},
    "/permissions"=>{if !matches!(arg,"ask"|"allow"|"deny"){bail!("Use /permissions ask, allow, or deny")};self.cli.permissions=arg.into();self.notify(format!("Permissions: {arg} · applies to file writes and shell commands"));},
-   "/check"=>{let (path,expected)=arg.split_once(' ').map(|(a,b)|(a,Some(b))).unwrap_or((arg,None));if path.is_empty(){bail!("Use /check path [expected JSON]")};let (kind,value)=if let Some(json)=expected{{serde_json::from_str::<Value>(json)?;("json_equals",json!(json))}}else{("exists",json!(""))};let result=tools::execute(&self.cfg.project,"check_file",&json!({"path":path,"kind":kind,"expected":value}),&Arc::new(AtomicBool::new(false)))?;self.session.checks.push(serde_json::from_value(result.clone())?);if self.session.work.goal.is_empty(){self.session.work=crate::work::Work::begin(&format!("Check {path}"));}self.session.work.record("check_file",&json!({"path":path}),&result,false);self.session.add("tool",format!("check_file  {path} · {}\n{result}",if result["passed"]==true{"verified"}else{"check failed"}));self.reaction=Some((if result["passed"]==true{"pleased"}else{"concerned"}.into(),Instant::now()));self.persist()?;},
+   "/check"=>self.local_check(arg)?,
+
    "/compact"=>self.compact()?,
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
    "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
    "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
-   "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
+   "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 active seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
@@ -474,11 +478,69 @@ impl App {
             "Tell me the task and I will keep its plan, changes and evidence here.\n\n/plan       discuss and inspect\n/build      make changes with tools\n/review     inspect this turn's edits\n/check      independently verify a file\n\nDuring work, approvals and questions appear beside me. F2 opens this card; Esc stops ongoing work.".into()
         } else {
             format!(
-                "{}\nF3 /review · inspect edits\nEsc closes this card · Esc again stops work",
+                "{}\nF3 /review · inspect edits\nF5 /checks · inspect evidence\nEsc closes this card · Esc again stops work",
                 self.session.work.summary()
             )
         };
         self.info("Working together · 弄玉", text);
+    }
+    fn local_check(&mut self, argument: &str) -> Result<()> {
+        let (path, expected) = argument
+            .split_once(' ')
+            .map(|(a, b)| (a, Some(b)))
+            .unwrap_or((argument, None));
+        if path.is_empty() {
+            bail!("Use /check path [expected JSON]");
+        }
+        let (kind, expected) = if let Some(text) = expected {
+            serde_json::from_str::<Value>(text)?;
+            ("json_equals", text)
+        } else {
+            ("exists", "")
+        };
+        let args = json!({"path":path,"kind":kind,"expected":expected});
+        let result = tools::execute(
+            &self.cfg.project,
+            "check_file",
+            &args,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        let (result, error) = match result {
+            Ok(result) => {
+                self.session
+                    .checks
+                    .push(serde_json::from_value(result.clone())?);
+                (result, false)
+            }
+            Err(error) => (json!({"error":error.to_string(),"executed":true}), true),
+        };
+        if self.session.work.goal.is_empty() {
+            self.session.work = crate::work::Work::begin(&format!("Check {path}"));
+        }
+        self.session
+            .work
+            .record("check_file", &args, &result, error);
+        self.session.tools += 1;
+        self.session.add("you", format!("/check {argument}"));
+        self.session
+            .add("tool", format!("check_file  {path}\n{result}"));
+        let id = format!("local-check-{}", uuid::Uuid::new_v4().simple());
+        self.session.messages.extend([
+            json!({"role":"user","content":format!("Run this local file check: /check {argument}")}),
+            json!({"role":"assistant","content":[{"type":"tool_use","id":id,"name":"check_file","input":args}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":result.to_string(),"is_error":error}]}),
+        ]);
+        self.reaction = Some((
+            if self.session.work.verified() {
+                "pleased"
+            } else {
+                "concerned"
+            }
+            .into(),
+            Instant::now(),
+        ));
+        self.notice = self.session.work.verdict().into();
+        self.persist()
     }
     fn show_resources(&mut self, skills: bool) {
         if matches!(
@@ -660,6 +722,9 @@ impl App {
                         if title.starts_with("Working together") {
                             *text = self.session.work.summary();
                         }
+                        if title.starts_with("Checks beside") {
+                            *text = self.session.work.checks_summary();
+                        }
                     }
                 }
                 Event::Question {
@@ -711,9 +776,7 @@ impl App {
                 }
                 Event::Finished(session) => {
                     advance_queue = session.status == "done";
-                    let happy = session.status == "done"
-                        && !session.work.evidence.is_empty()
-                        && session.work.evidence.iter().all(|e| e.passed);
+                    let happy = session.status == "done" && session.work.verified();
                     self.reaction = Some((
                         if happy {
                             "pleased"
@@ -728,9 +791,13 @@ impl App {
                     let pending = std::mem::take(&mut self.session.pending);
                     self.session = *session;
                     self.session.pending = pending;
-                    if self.session.work.evidence.iter().any(|e| !e.passed) {
+                    if self.session.work.has_failures() {
                         self.notice =
                             "A check or command failed · F4 output · /work details".into();
+                        self.reaction = Some(("concerned".into(), Instant::now()));
+                    } else if self.session.work.has_stale_checks() {
+                        self.notice =
+                            "Edits changed the project after checks · F5 to review".into();
                         self.reaction = Some(("concerned".into(), Instant::now()));
                     }
                     self.running = None;
@@ -781,7 +848,7 @@ impl App {
             }
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
-        } else if self.session.work.evidence.iter().any(|e| !e.passed) {
+        } else if self.session.work.has_failures() || self.session.work.has_stale_checks() {
             "concerned"
         } else if let Some((reaction, at)) = &self.reaction {
             if at.elapsed() < Duration::from_secs(3) {
@@ -823,6 +890,10 @@ impl App {
         }
         if key.code == KeyCode::F(4) {
             self.command("/output")?;
+            return Ok(());
+        }
+        if key.code == KeyCode::F(5) {
+            self.command("/checks")?;
             return Ok(());
         }
         if key.code == KeyCode::F(3) {
@@ -1377,7 +1448,7 @@ impl App {
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
                     | Popup::Resources { .. }
-            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output"));
+            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output") || title.starts_with("Checks beside"));
             let side_by_side = decision && pet_width > 0 && chat.width >= 42;
             if side_by_side {
                 f.render_widget(Clear, chat);
@@ -1507,8 +1578,10 @@ impl App {
             self.session.work.activity.as_str()
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
-        } else if self.session.work.evidence.iter().any(|e| !e.passed) {
+        } else if self.session.work.has_failures() {
             "a check needs attention"
+        } else if self.session.work.has_stale_checks() {
+            "edits need a fresh check"
         } else {
             "here with you"
         };
@@ -1627,7 +1700,7 @@ impl App {
         if card_height >= 4 {
             lines.push(line(
                 work.verdict(),
-                if work.evidence.iter().any(|e| !e.passed) {
+                if work.has_failures() || work.has_stale_checks() {
                     GOLD
                 } else {
                     DIM
@@ -1762,7 +1835,9 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
             terminal.draw(|f| app.draw(f))?;
             if old_area.is_some_and(|r| r != app.image_area) {
                 write!(io::stdout(), "{}", app.graphics.clear())?;
-                terminal.clear()?;
+                // Fullscreen redraw needs no cursor-position round trip. A queued
+                // Escape or an emulator without a reply must not terminate Aster.
+                terminal.resize(terminal.size()?.into())?;
                 terminal.draw(|f| app.draw(f))?;
                 app.last_image = None;
             }
@@ -1791,7 +1866,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                     }
                     TermEvent::Resize(_, _) => {
                         write!(io::stdout(), "{}", app.graphics.clear())?;
-                        terminal.clear()?;
+                        terminal.resize(terminal.size()?.into())?;
                         app.last_image = None;
                     }
                     TermEvent::Mouse(mouse) => match mouse.kind {
@@ -2117,6 +2192,34 @@ mod layout_tests {
             1
         );
         assert!(a.store.load(&a.session.id).unwrap().pending.is_empty());
+    }
+    #[test]
+    fn manual_checks_refresh_exact_evidence_and_preserve_provider_pairs() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        fs::write(a.cfg.project.join("answer.json"), "{\"ok\":false}").unwrap();
+        a.command("/check answer.json {\"ok\":true}").unwrap();
+        assert!(a.session.work.has_failures());
+        a.command("/check answer.json").unwrap();
+        assert!(a.session.work.has_failures());
+        fs::write(a.cfg.project.join("answer.json"), "{\"ok\":true}").unwrap();
+        a.command("/check answer.json {\"ok\":true}").unwrap();
+        assert!(a.session.work.verified());
+        assert_eq!(a.reaction.as_ref().unwrap().0, "pleased");
+        assert_eq!(a.notice, "Recorded checks passed");
+        assert_eq!(a.session.work.model_requests, 0);
+        let messages = &a.session.messages;
+        let assistant = &messages[messages.len() - 2]["content"][0];
+        let result = &messages[messages.len() - 1]["content"][0];
+        assert_eq!(assistant["id"], result["tool_use_id"]);
+        fs::write(a.cfg.project.join("answer.json"), "invalid JSON").unwrap();
+        a.command("/check answer.json {\"ok\":true}").unwrap();
+        assert!(a.session.work.has_failures());
+        assert_eq!(a.reaction.as_ref().unwrap().0, "concerned");
+        a.command("/checks").unwrap();
+        assert!(
+            matches!(&a.popup, Some(Popup::Info { title, text, .. }) if title.starts_with("Checks beside") && text.contains("earlier result"))
+        );
     }
     #[test]
     fn pasted_question_answer_keeps_the_composer_draft() {

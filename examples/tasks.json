@@ -1,0 +1,22 @@
+{
+  "tasks": [
+    {
+      "name": "test",
+      "description": "Run the Rust test suite",
+      "command": "cargo test",
+      "timeout_secs": 120
+    },
+    {
+      "name": "lint",
+      "description": "Check formatting and reject compiler warnings",
+      "command": "cargo fmt --check && cargo clippy --all-targets -- -D warnings",
+      "timeout_secs": 120
+    },
+    {
+      "name": "build",
+      "description": "Build the optimized terminal application",
+      "command": "cargo build --release",
+      "timeout_secs": 120
+    }
+  ]
+}

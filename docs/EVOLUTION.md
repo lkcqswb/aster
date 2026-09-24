@@ -77,4 +77,8 @@ Searchable visible conversation history with role filters, full entry previews, 
 
 Markdown replies with styled headings, emphasis, inline code, nested lists, task markers, quotes, fenced code, tables and visible link destinations. Unicode graphemes and code spacing survive wrapping; narrow tables use stacked cells. Approval/review diffs distinguish additions and removals. Terminal controls remain inert, and SVG previews retain text styling. The actual animated terminal verified colors, a real approved edit and an independent passing check.
 
-Next: make repeatable project checks easier to run and strengthen automation outcomes.
+## Delivered in 0.17
+
+Local project task discovery and explicit task configuration, an F8 picker beside the companion, inspect-before-run controls and the existing approval/output/cancellation pipeline. Task browsing preserves pending decisions and drafts; execution needs no model request. Headless turns return a failing status for unresolved failed or stale checks, while a repaired check can succeed and ordinary conversation does not imply verification.
+
+Next: preserve queued work when a turn needs attention, and make resuming that work explicit.

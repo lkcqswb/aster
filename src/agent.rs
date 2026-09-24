@@ -196,7 +196,27 @@ fn turn_with_input(
         if prompt.trim() == "/run" {
             bail!("Use /run followed by a shell command");
         }
-        let direct_command = prompt.strip_prefix("/run ");
+        if prompt.trim() == "/task" {
+            bail!("Use /task followed by a name from /tasks");
+        }
+        let task = if let Some(name) = prompt.strip_prefix("/task ") {
+            Some(crate::tasks::resolve(&s.project, name.trim())?)
+        } else {
+            None
+        };
+        let direct_command = task
+            .as_ref()
+            .map(|task| task.command.as_str())
+            .or_else(|| prompt.strip_prefix("/run "));
+        if let Some(task) = &task {
+            s.work.goal = if task.description.is_empty() {
+                task.name.clone()
+            } else {
+                format!("{} · {}", task.name, task.description)
+            };
+            s.work.focus = task.command.clone();
+        }
+
         let rules = instructions::load(&s.project)?;
         let mut seen = rules.iter().map(|r| r.path.clone()).collect::<HashSet<_>>();
         let catalog = crate::context::discover(&s.project);
@@ -250,7 +270,7 @@ fn turn_with_input(
             }
             let _ = tx.send(Event::State("thinking".into()));
             let response = if let Some(command) = direct_command {
-                json!({"content":[{"type":"tool_use","id":format!("local-command-{}",uuid::Uuid::new_v4().simple()),"name":"shell","input":{"command":command}}],"stop_reason":"tool_use","usage":{}})
+                json!({"content":[{"type":"tool_use","id":format!("local-command-{}",uuid::Uuid::new_v4().simple()),"name":"shell","input":{"command":command,"timeout_secs":task.as_ref().map(|task|task.timeout_secs).unwrap_or(30)}}],"stop_reason":"tool_use","usage":{}})
             } else if s.demo {
                 demo_response(turn, prompt, &s.messages, cancel, tx)?
             } else {
@@ -1131,6 +1151,72 @@ mod integration_tests {
         assert_eq!(steering.lock().unwrap().len(), 1);
         assert!(!d.path().join("stale").exists());
         assert_eq!(s.work.model_requests, 0);
+    }
+    #[test]
+    fn named_tasks_obey_plan_mode_approval_timeout_and_need_no_key() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".aster")).unwrap();
+        std::fs::write(d.path().join(".aster/tasks.json"), r#"{"tasks":[{"name":"proof","description":"Check the fixture","command":"printf task-proof > result.txt","timeout_secs":2},{"name":"slow","command":"sleep 3; touch too-late","timeout_secs":1}]}"#).unwrap();
+        let cfg = config(d.path());
+        let (tx, _) = crossbeam_channel::unbounded();
+        let mut plan = Session::new(cfg.project.clone(), cfg.model.clone(), false);
+        plan.mode = "plan".into();
+        let plan = turn(
+            plan,
+            "/task proof",
+            &cfg,
+            "allow",
+            &tx,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert!(!d.path().join("result.txt").exists());
+        assert!(plan.work.command.is_none());
+        let r = spawn(
+            Session::new(cfg.project.clone(), cfg.model.clone(), false),
+            "/task proof".into(),
+            cfg.clone(),
+            "ask".into(),
+        );
+        let mut approved = false;
+        for event in &r.events {
+            match event {
+                Event::Approval {
+                    tool,
+                    preview,
+                    answer,
+                } => {
+                    assert_eq!(tool, "shell");
+                    assert!(preview.contains("printf task-proof > result.txt"));
+                    assert!(!d.path().join("result.txt").exists());
+                    approved = true;
+                    answer.send(true).unwrap();
+                }
+                Event::Finished(s) => {
+                    assert!(approved);
+                    assert_eq!(s.work.model_requests, 0);
+                    assert_eq!(s.work.goal, "proof · Check the fixture");
+                    assert!(s.work.verified());
+                    assert_eq!(
+                        std::fs::read_to_string(d.path().join("result.txt")).unwrap(),
+                        "task-proof"
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let slow = turn(
+            Session::new(cfg.project.clone(), cfg.model.clone(), false),
+            "/task slow",
+            &cfg,
+            "allow",
+            &tx,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert!(slow.work.command.as_ref().unwrap().timed_out);
+        assert!(slow.work.has_failures());
+        assert!(!d.path().join("too-late").exists());
+        assert_eq!(slow.work.model_requests, 0);
     }
     #[test]
     fn approval_does_not_overwrite_a_concurrent_user_edit() {

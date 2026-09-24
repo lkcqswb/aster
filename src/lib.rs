@@ -12,6 +12,7 @@ pub mod navigator;
 pub mod project;
 pub mod richtext;
 pub mod session;
+pub mod tasks;
 pub mod theme;
 pub mod tools;
 pub mod ui;

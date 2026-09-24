@@ -108,6 +108,7 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/model live\|demo\|NAME` | Select MiniMax, the offline demo, or a model name |
 | `/check FILE [JSON]` | Check existence, or compare saved JSON with an expected value |
 | `/run COMMAND` | Run a local command without calling the model |
+| `/tasks [filter]`, `/task NAME` | Inspect or run project tasks; F8 opens the picker |
 | `/output` | Watch current command output, elapsed time and final status |
 | `/recover` | Ask the model to investigate the latest command failure |
 | `/work` | Inspect the current task plan, files and independent evidence |
@@ -144,6 +145,8 @@ The tools are `read_skill`, `list_files`, `read_file`, `search`, `write_file`, `
 
 By default each write or shell command is shown for approval. `y` allows that action once; `n` or Escape declines it. Plan mode forbids writes and shell commands regardless of the approval setting. **Approved shell commands run as your user and are not a filesystem sandbox.** Credential environment variables are removed from their environment. Commands default to 30 seconds; the model can request 1–120 seconds, bounded by the remaining active turn time. The approval shows the command and requested limit. Output streams into **F4 /output** beside 弄玉, and clicking her during a command opens that view. The final record distinguishes exit status, timeout and your stop action. Capture retains the first and last 16 KB of each stream, while the live panel shows its latest 4 KB. Process-group cancellation stops background children too.
 
+**F8 /tasks** discovers project tests, scripts and builds, or reads your explicit `.aster/tasks.json`. Inspect a command beside 弄玉, then run it with the usual permissions and no model request. [Project tasks](docs/TASKS.md) describes discovery, configuration and automation outcomes.
+
 `/run COMMAND` uses the same permission and plan-mode rules with no model request. After a failure, `/recover` starts a new model turn to inspect the evidence, make a focused repair and check it. It does not automatically repeat the command or approve another action. Try `/demo command`, `/demo command timeout` and `/demo command stop` for local examples.
 
 A completed reply means the model finished speaking. A passed check means a specific saved-file assertion was evaluated successfully. Neither alone proves the entire project is correct. Read the actual check or test output.
@@ -167,7 +170,7 @@ aster --project /path/to/project --prompt 'Explain this project'
 aster --demo --permissions allow --prompt 'demo task'
 ```
 
-Non-interactive mode declines actions that need confirmation unless `--permissions allow` was explicitly selected. A headless `/run` exits nonzero when its command fails, times out, is stopped or is denied.
+Non-interactive mode declines actions that need confirmation unless `--permissions allow` was explicitly selected. A headless `/run` or `/task` exits nonzero when its command fails, times out, is stopped or is denied. Other headless turns also fail when recorded checks are currently failing or stale; a reply without checks can finish successfully without claiming verification.
 
 ## Development and verification
 

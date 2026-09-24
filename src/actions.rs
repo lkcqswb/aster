@@ -91,6 +91,11 @@ fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
         "Current step, activity and recorded evidence.",
     );
     add(
+        Action::Command("/tasks"),
+        "Run a project check or build",
+        "Inspect named local commands before starting one.",
+    );
+    add(
         Action::Command("/files"),
         "Read project files together",
         "Browse, preview and attach source to your draft.",

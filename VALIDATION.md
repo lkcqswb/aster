@@ -1,3 +1,10 @@
+# Project tasks and automation outcomes 0.17 — 2026-09-24
+
+- **90 Rust tests passed**, formatting, strict Clippy and release build passed. New coverage includes explicit/discovered tasks, invalid configuration, source boundaries, plan-mode denial, approval before execution, task-specific timeout, and inspection preserving the selected command, draft and pending question.
+- The actual animated terminal inspected a named task, ignored pasted text while inspecting, requested shell approval before writing, showed output before command completion, saved a real file and passing evidence, then recorded exit 7 and stderr from a failing task. The companion kept its attention state. **32 distinct frames**, resize, exit 0; no model requests or tokens. Evidence: `.aster/qa/tasks-e2e.json`.
+- Eight headless cases returned the expected status: success/repaired check/conversation 0; failed command/denied task/unknown task/failed file check/stale check 1. The denied task's file remained absent. Commands are local user-authorized shell operations, not sandboxed execution.
+- General terminal regression passed. The actual task-picker SVG/PNG was visually inspected beside the model: `.aster/qa/aster-tasks.svg` and `.png`.
+
 # Readable replies and diffs 0.16 — 2026-09-24
 
 - **85 Rust tests passed**, formatting, strict Clippy and release build passed. Tests cover Markdown styles, preserved code spacing, diff colors, grapheme-aware wrapping, table widths and narrow fallbacks, nested blocks, inert HTML/entities and incomplete streamed Markdown.

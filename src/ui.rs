@@ -62,6 +62,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/permissions", "ask, allow, or deny actions"),
     ("/check", "Verify a file independently"),
     ("/checks", "Inspect current checks and their history"),
+    ("/tasks", "Browse local project tests and build commands"),
+    ("/task", "Run a named project task without a model request"),
     ("/run", "Run a local command without a model request"),
     ("/output", "Watch the latest command output"),
     ("/recover", "Ask for help with a failed command"),
@@ -249,6 +251,13 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    Tasks {
+        catalog: crate::tasks::Catalog,
+        query: String,
+        index: usize,
+        preview: bool,
+        scroll: u16,
+    },
     History(crate::history::History),
     Actions(crate::actions::Menu),
     Project(Box<crate::navigator::Navigator>),
@@ -497,8 +506,12 @@ impl App {
             menu.paste(&text);
         } else if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.paste(&text);
+        } else if matches!(&self.popup, Some(Popup::Tasks { preview: true, .. })) {
+            // Inspecting must not silently change the selected command.
         } else if let Some(
-            Popup::Resources { query, index, .. } | Popup::Sessions { query, index, .. },
+            Popup::Resources { query, index, .. }
+            | Popup::Sessions { query, index, .. }
+            | Popup::Tasks { query, index, .. },
         ) = &mut self.popup
         {
             if query.len() + text.len() <= 160 {
@@ -576,6 +589,7 @@ impl App {
                 | "/queue"
                 | "/context"
                 | "/history"
+                | "/tasks"
                 | "/checkpoint"
                 | "/skills"
                 | "/files"
@@ -597,6 +611,8 @@ impl App {
    "/queue"=>{let text=if self.session.pending.is_empty(){"No messages waiting.\n\nWhile working: Enter adds a direction; Alt+Enter queues the next task.\n/steer MESSAGE · /follow MESSAGE".into()}else{format!("{}\n\n/next runs the next message when idle.\n/drop ID removes a waiting message.\nStopping preserves the queue; it does not run automatically after an error or restart.",self.session.pending.iter().map(|m|format!("{} · {}\n{}\n",m.id,if m.delivery==Delivery::Steer{"direction"}else{"next task"},m.text)).collect::<Vec<_>>().join("\n"))};self.info("Messages waiting for 弄玉",text);},
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
+   "/tasks"=>self.inspect(Popup::Tasks{catalog:crate::tasks::discover(&self.cfg.project)?,query:arg.into(),index:0,preview:false,scroll:0}),
+   "/task"=>{if arg.is_empty(){bail!("Use /task followed by a name from /tasks")};self.submit(format!("/task {arg}"))?;},
    "/history"=>self.inspect(Popup::History(crate::history::History::new(&self.session,arg.into()))),
    "/together"=>self.show_actions(),
    "/work"=>self.show_work(),
@@ -1015,6 +1031,7 @@ impl App {
             }
         } else if matches!(&self.popup,Some(Popup::Project(nav)) if nav.reading() || nav.busy())
             || matches!(&self.popup, Some(Popup::History(history)) if history.preview)
+            || matches!(&self.popup, Some(Popup::Tasks { preview: true, .. }))
         {
             "reading"
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
@@ -1068,6 +1085,10 @@ impl App {
             }
             return Ok(());
         }
+        if key.code == KeyCode::F(8) {
+            self.command("/tasks")?;
+            return Ok(());
+        }
         if key.code == KeyCode::F(7) {
             self.command("/history")?;
             return Ok(());
@@ -1094,6 +1115,78 @@ impl App {
         }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::Tasks {
+                    catalog,
+                    mut query,
+                    mut index,
+                    mut preview,
+                    mut scroll,
+                } => {
+                    let filtered = catalog
+                        .tasks
+                        .iter()
+                        .filter(|task| {
+                            format!("{} {}", task.name, task.description)
+                                .to_lowercase()
+                                .contains(&query.to_lowercase())
+                        })
+                        .collect::<Vec<_>>();
+                    match key.code {
+                        KeyCode::Esc if preview => {
+                            preview = false;
+                            scroll = 0;
+                        }
+                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Enter => {
+                            if let Some(task) = filtered.get(index) {
+                                if self.running.is_some() || self.inspection_return.is_some() {
+                                    self.notify("Finish or stop the current task and resolve its decision before starting another.");
+                                } else {
+                                    self.submit(format!("/task {}", task.name))?;
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        KeyCode::Tab => {
+                            preview = !preview;
+                            scroll = 0;
+                        }
+                        KeyCode::Up | KeyCode::PageUp if preview => {
+                            scroll = scroll.saturating_sub(4)
+                        }
+                        KeyCode::Down | KeyCode::PageDown if preview => {
+                            scroll = scroll.saturating_add(4)
+                        }
+                        KeyCode::Up => index = index.saturating_sub(1),
+                        KeyCode::Down => index = (index + 1).min(filtered.len().saturating_sub(1)),
+                        KeyCode::Char('u')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) && !preview =>
+                        {
+                            query.clear();
+                            index = 0;
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !preview
+                                && query.len() < 160 =>
+                        {
+                            query.push(c);
+                            index = 0;
+                        }
+                        KeyCode::Backspace if !preview => {
+                            query.pop();
+                            index = 0;
+                        }
+                        _ => {}
+                    }
+                    self.popup = Some(Popup::Tasks {
+                        catalog,
+                        query,
+                        index,
+                        preview,
+                        scroll,
+                    });
+                }
                 Popup::History(mut history) => {
                     match history.key(key) {
                         crate::history::Action::Keep => self.popup = Some(Popup::History(history)),
@@ -1747,6 +1840,7 @@ impl App {
                 Popup::Approval(_)
                     | Popup::Actions(_)
                     | Popup::History(_)
+                    | Popup::Tasks { .. }
                     | Popup::Project(_)
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
@@ -1881,6 +1975,8 @@ impl App {
             "finding the right context"
         } else if matches!(self.popup, Some(Popup::History(_))) {
             "looking back together"
+        } else if matches!(self.popup, Some(Popup::Tasks { .. })) {
+            "choosing the next check"
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
         } else if self.session.work.has_failures() {
@@ -2145,6 +2241,20 @@ impl App {
             return rows;
         }
         let (title,text,scroll)=match p{
+   Popup::Tasks{catalog,query,index,preview,scroll}=>{
+       let filtered=catalog.tasks.iter().filter(|task|format!("{} {}",task.name,task.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();
+       if *preview && let Some(task)=filtered.get(*index){(format!("Project task · {}",task.name),task.details(),*scroll)}else{
+           let visible=(inner.height.saturating_sub(7)/3).max(1) as usize;
+           let query_line=wrap(&format!("Find: {query}"),inner.width as usize).first().cloned().unwrap_or_default();
+           let mut text=format!("{query_line}\nLocal commands · permissions apply\n\n");
+           for (i,task) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){
+               text+=&format!("{} {} · {}s\n  {}\n\n",if i==*index{"›"}else{" "},task.name,task.timeout_secs,wrap_prose(&task.description,inner.width.saturating_sub(4) as usize).first().cloned().unwrap_or_default());
+           }
+           if filtered.is_empty(){text+=&format!("No matching tasks.\n{}",catalog.notes.join("\n"));}
+           text+="\n↑↓ choose · Tab inspect · Enter run · Esc close";
+           ("Project tasks beside 弄玉".into(),text,0)
+       }
+   },
    Popup::History(history)=>{
        if history.preview && let Some(entry)=history.selected() {
            let item=&history.items[entry];
@@ -2421,7 +2531,10 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 if matches!(s.status.as_str(), "error" | "stopped" | "interrupted") {
                     bail!("Turn ended with an error")
                 };
-                if cli.prompt.as_ref().is_some_and(|p| p.starts_with("/run "))
+                if cli
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|p| p.starts_with("/run ") || p.starts_with("/task "))
                     && !s
                         .work
                         .command
@@ -2429,6 +2542,12 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         .is_some_and(|c| c.exit_code == Some(0) && !c.stopped && !c.timed_out)
                 {
                     bail!("Local command did not succeed; inspect its saved output");
+                }
+                if s.work.has_failures() || s.work.has_stale_checks() {
+                    bail!(
+                        "{}; inspect /checks in the saved conversation",
+                        s.work.verdict()
+                    );
                 }
                 return Ok(());
             }
@@ -2983,6 +3102,43 @@ mod layout_tests {
         assert!(a.popup.is_none());
         assert!(a.running.is_none());
         assert!(a.session.messages.is_empty());
+        assert_eq!(a.session.work.model_requests, 0);
+    }
+    #[test]
+    fn task_inspection_keeps_selection_draft_and_pending_decision() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".aster")).unwrap();
+        std::fs::write(
+            d.path().join(".aster/tasks.json"),
+            r#"{"tasks":[{"name":"proof","command":"touch proof"}]}"#,
+        )
+        .unwrap();
+        let mut a = app(d.path());
+        a.input_set("Keep my draft");
+        let (answer, rx) = crossbeam_channel::bounded(1);
+        a.popup = Some(Popup::Question {
+            question: "Choose".into(),
+            options: vec![],
+            input: "Partial answer".into(),
+            answer,
+        });
+        a.command("/tasks").unwrap();
+        a.paste("proof");
+        a.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        a.paste("another task");
+        assert!(matches!(&a.popup, Some(Popup::Tasks{query,preview:true,..}) if query == "proof"));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(a.running.is_none());
+        assert!(!d.path().join("proof").exists());
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&a.popup, Some(Popup::Question{input,..}) if input == "Partial answer"));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(a.input, "Keep my draft");
         assert_eq!(a.session.work.model_requests, 0);
     }
     #[test]

@@ -38,11 +38,12 @@ Put that function in `~/.zshrc`, then run `source ~/.zshrc` once. No Python runt
 
 The companion pane is part of the terminal layout, not a separate window. iTerm2 receives inline JPEG frames; Ghostty and Kitty receive PNG frames through the Kitty graphics protocol, replaced in place under one image id. Aster detects these terminals and has an animated character-cell fallback that draws each cell as a two-colour quadrant block (four pixels per cell). Select a protocol explicitly with `--graphics iterm`, `--graphics kitty`, or `--graphics halfblocks`.
 
-- Start typing: she becomes attentive.
-- Send a message: she thinks while waiting, works during tools, and speaks during streamed text.
-- Pass a file check: a brief pleased reaction. Fail or encounter an error: a concerned state.
+- Start typing: she becomes attentive and leans in. Send a message: a small nod, then she thinks while waiting, works during tools and speaks during streamed text.
+- Her replies carry her feelings. The model may begin a reply or paragraph with a hidden cue such as `〔happy〕`, `〔worried〕` or `〔wave〕`. Aster removes it from the transcript (and from headless output), keeps it in the private provider history and shows it on her face or in a gesture. A reply without a cue is read conservatively for tone, so an apology looks worried and laughter looks amused.
+- What happens moves her too: a tilt at questions and approvals; happy with a cheer when checks pass; worried when a check or command fails; a stretch after compaction. When things are quiet she shifts her weight, glances around and fidgets. After five quiet minutes she grows sleepy until you come back.
+- `/mood` lists her 18 emotions (and her rig's own expressions); `/mood NAME` sets her base mood. `/act` lists her 12 gestures; `/act NAME` plays one, or any of her rig's motion groups by name.
+- `/pet rig` shows the emotion and action controls discovered on her rig and which ones each emotion and gesture uses. [Her emotions and gestures](docs/NONGYU.md) explains the discovery keywords and the optional `aster-nongyu.json` override file for fixing a match.
 - Click the portrait or use `/look` for a glance and nod.
-- `/mood happy`, `/mood heart`, `/mood angry`, `/mood neutral` change her expression.
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
@@ -52,7 +53,7 @@ Her work card tracks the active plan step, file or command, pending decision, an
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
 
-Her motion is procedural and eased: every state change moves her toward a new pose instead of snapping, with randomized blinks, small eye saccades, a head that follows her gaze, and slow breathing and sway. Speaking motion follows the rate of streamed reply text: syllable-like mouth pulses while text arrives, closing shortly after it stops. This version does not synthesize speech or claim audio lip sync. If the model declares expressions or motions, a matching mood expression, a tap motion and occasional idle motions blend with that procedural layer. The companion is a fictional AI character.
+Her motion is procedural and eased: every state change moves her toward a new pose instead of snapping, with randomized blinks, small eye saccades, a head that follows her gaze, and slow breathing and sway. Speaking motion follows the rate of streamed reply text: syllable-like mouth pulses while text arrives, closing shortly after it stops. This version does not synthesize speech or claim audio lip sync. Emotions combine her procedural pose with the toggles, expressions and motions found on her rig (blush, tears, heart or star eyes, sweat, gestures with her arms and so on), eased in and out. Mouth-form and brow controls are never driven. The companion is a fictional AI character.
 
 By default Aster reads existing assets here:
 

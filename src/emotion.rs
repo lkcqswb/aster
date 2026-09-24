@@ -4,40 +4,8 @@
 //! `〔happy〕` or `〔wave〕`. Cues are hidden from the transcript, never sent anywhere else, and
 //! only move her face and body. Unknown bracketed text is left exactly as written.
 
-pub const EMOTIONS: &[&str] = &[
-    "neutral",
-    "happy",
-    "laugh",
-    "shy",
-    "love",
-    "excited",
-    "surprised",
-    "confused",
-    "thinking",
-    "sad",
-    "cry",
-    "angry",
-    "pout",
-    "embarrassed",
-    "sleepy",
-    "proud",
-    "worried",
-    "dizzy",
-];
-pub const GESTURES: &[&str] = &[
-    "wave",
-    "nod",
-    "shake",
-    "tilt",
-    "think",
-    "cheer",
-    "heart",
-    "cover",
-    "stretch",
-    "look_around",
-    "fidget",
-    "bow",
-];
+/// The renderer's vocabulary; one list, so a cue always has somewhere to go.
+pub use crate::live2d::{EMOTIONS, GESTURES};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cue {

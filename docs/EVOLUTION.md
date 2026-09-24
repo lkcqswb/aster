@@ -28,4 +28,8 @@ Exact edits with prepared diffs and stale-file rejection; numbered/paginated rea
 
 Steering at tool boundaries; Ctrl+G to redirect pending decisions; durable follow-up queues; inspection, removal and explicit restart of saved messages; user decision time separated from active work limits. Skipped actions produce provider-compatible tool results without being counted as executed checks. A live MiniMax redirection test left the old file absent and verified the new file.
 
-Next: inspectable project context, file references and reusable skills; then stronger command feedback and companion-guided recovery.
+## Delivered in 0.5
+
+A searchable skill/prompt picker beside the model, lazy skill and supporting-file loading, explicit file/range attachments, context inspection and bounded preflight checks. The work card tracks skills and references. Project guidance still applies and resources grant no tool permissions. A live task read a skill reference and an attached line to produce exactly verified JSON.
+
+Next: stronger live command feedback, companion-guided recovery, and renderer startup/resource reliability.

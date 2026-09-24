@@ -32,6 +32,8 @@ pub struct Work {
     pub diffs: Vec<(String, String)>,
     pub evidence: Vec<Evidence>,
     pub waiting: String,
+    pub skills: Vec<String>,
+    pub context_files: Vec<String>,
 }
 impl Work {
     pub fn begin(prompt: &str) -> Self {
@@ -71,6 +73,15 @@ impl Work {
             self.focus = crate::tools::clip(subject, 240);
         }
         self.waiting.clear();
+        if name == "read_skill"
+            && !error
+            && let Some(skill) = result["skill"].as_str()
+        {
+            if !self.skills.iter().any(|s| s == skill) {
+                self.skills.push(skill.into());
+            }
+            self.focus = format!("Skill · {skill}");
+        }
         if result["written"] == true {
             if !self.changed.iter().any(|p| p == subject) {
                 self.changed.push(subject.into());
@@ -128,6 +139,12 @@ impl Work {
         }
         if !self.changed.is_empty() {
             out += &format!("\nChanged files\n{}\n", self.changed.join("\n"));
+        }
+        if !self.skills.is_empty() {
+            out += &format!("\nSkills in use\n{}\n", self.skills.join("\n"));
+        }
+        if !self.context_files.is_empty() {
+            out += &format!("\nAttached files\n{}\n", self.context_files.join("\n"));
         }
         out
     }

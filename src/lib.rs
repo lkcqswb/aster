@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod config;
+pub mod context;
 pub mod edits;
 pub mod instructions;
 pub mod live2d;

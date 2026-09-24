@@ -100,7 +100,34 @@ fn inject_steering(
     let count = batch.len();
     for message in batch {
         s.work.focus = tools::clip(&message.text, 240);
-        let text = format!("Aster added while working:\n{}", message.text);
+        let prepared = crate::context::prepare(
+            &s.project,
+            &message.text,
+            &crate::context::discover(&s.project),
+        );
+        let expanded = match prepared {
+            Ok(p) => {
+                for name in p.skills {
+                    if !s.work.skills.contains(&name) {
+                        s.work.skills.push(name);
+                    }
+                }
+                for file in p.files {
+                    if !s.work.context_files.contains(&file) {
+                        s.work.context_files.push(file);
+                    }
+                }
+                p.content
+            }
+            Err(e) => {
+                entry(s, tx, "notice", format!("Context could not be loaded: {e}"));
+                format!(
+                    "{}\n\nContext attachment failed: {e}. Do not claim to have read the attachment.",
+                    message.text
+                )
+            }
+        };
+        let text = format!("Aster added while working:\n{expanded}");
         if let Some(last) = s.messages.last_mut().filter(|m| m["role"] == "user") {
             if let Some(blocks) = last["content"].as_array_mut() {
                 blocks.push(json!({"type":"text","text":text}));
@@ -168,7 +195,16 @@ fn turn_with_input(
     let outcome = (|| -> Result<()> {
         let rules = instructions::load(&s.project)?;
         let mut seen = rules.iter().map(|r| r.path.clone()).collect::<HashSet<_>>();
-        let system = persona(&s, &rules);
+        let catalog = crate::context::discover(&s.project);
+        let prepared = crate::context::prepare(&s.project, prompt, &catalog)?;
+        for rule in &prepared.rules {
+            seen.insert(rule.path.clone());
+        }
+        s.work.skills = prepared.skills;
+        s.work.context_files = prepared.files;
+        s.messages.last_mut().context("Missing user message")?["content"] = json!(prepared.content);
+        let _ = tx.send(Event::Work(s.work.clone()));
+        let system = format!("{}{}", persona(&s, &rules), catalog.advertised());
         let mut started = Instant::now();
         let initial_output = s.output_tokens;
         let initial_tools = s.tools;
@@ -325,6 +361,21 @@ fn turn_with_input(
                         s.tools += 1;
                         return Ok(json!({"answer":answer}));
                     }
+                    if name == "read_skill" {
+                        let skill = args["name"].as_str().context("name must be text")?;
+                        let file = args
+                            .get("path")
+                            .map(|v| v.as_str().context("path must be text"))
+                            .transpose()?
+                            .unwrap_or("SKILL.md");
+                        s.tools += 1;
+                        executed = true;
+                        return catalog.read_skill(
+                            skill,
+                            file,
+                            s.work.skills.iter().any(|n| n == skill),
+                        );
+                    }
                     if tools::mutates(name) && s.mode == "plan" {
                         bail!(
                             "Plan mode is read-only. Switch to build mode before modifying files or running commands."
@@ -467,6 +518,11 @@ fn request(
     cancel: &Arc<AtomicBool>,
     tx: &Sender<Event>,
 ) -> Result<Value> {
+    if serde_json::to_vec(&session.messages)?.len() + system.len() > 400_000 {
+        bail!(
+            "Context exceeds 400 KB. Use /context to inspect it and /compact or /new before continuing. No request was sent."
+        );
+    }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(seconds))
@@ -846,6 +902,49 @@ mod integration_tests {
                 _ => {}
             }
         }
+    }
+    #[test]
+    fn explicit_skill_and_file_context_preserve_the_readable_user_message() {
+        let d = tempfile::tempdir().unwrap();
+        let folder = d.path().join(".agents/skills/fixture");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\nname: fixture\ndescription: Test fixture\n---\nUSE-SKILL-CONTEXT-486",
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("source.txt"),
+            "first\nATTACHED-LINE-486\nlast",
+        )
+        .unwrap();
+        let cfg = config(d.path());
+        let (tx, _) = crossbeam_channel::unbounded();
+        let prompt = "/skill fixture inspect @source.txt:2";
+        let s = turn(
+            Session::new(cfg.project.clone(), cfg.model.clone(), true),
+            prompt,
+            &cfg,
+            "allow",
+            &tx,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(s.status, "done");
+        assert_eq!(s.entries[0].text, prompt);
+        assert!(
+            s.messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("USE-SKILL-CONTEXT-486")
+        );
+        assert!(
+            s.messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("2: ATTACHED-LINE-486")
+        );
+        assert_eq!(s.work.skills, ["fixture"]);
+        assert_eq!(s.work.context_files, ["source.txt:2"]);
     }
     #[test]
     fn approval_does_not_overwrite_a_concurrent_user_edit() {

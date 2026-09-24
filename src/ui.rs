@@ -48,6 +48,12 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/rename", "Name this conversation"),
     ("/fork", "Branch the conversation"),
     ("/model", "Choose live MiniMax or demo"),
+    ("/context", "Inspect model context and attached files"),
+    ("/skills", "Inspect available project and personal skills"),
+    ("/skill", "Use a skill by name"),
+    ("/prompts", "Browse reusable task prompts"),
+    ("/prompt", "Use a reusable prompt"),
+    ("/reload", "Refresh project instructions and resources"),
     ("/agents", "Inspect AGENTS.md instructions"),
     ("/init", "Create project guidance if missing"),
     ("/plan", "Think and read · no edits"),
@@ -149,6 +155,12 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    Resources {
+        items: Vec<crate::context::Resource>,
+        skills: bool,
+        query: String,
+        index: usize,
+    },
     Redirect {
         input: String,
         previous: Option<Box<Popup>>,
@@ -353,12 +365,20 @@ impl App {
                 | "/steer"
                 | "/follow"
                 | "/queue"
+                | "/context"
+                | "/skills"
+                | "/prompts"
                 | "/drop"
         ) && self.busy_guard()
         {
             return Ok(());
         }
         match cmd {
+   "/context"=>{let catalog=crate::context::discover(&self.cfg.project);let rules=instructions::load(&self.cfg.project)?;self.info("Context beside 弄玉",format!("{} provider messages · {} KB of saved content\n{} visible transcript entries · {} waiting messages\n\nAGENTS.md sources\n{}\n\n{} skills available · {} prompts available\n\nSkills used this turn\n{}\n\nAttached files this turn\n{}\n\nUse @path or @{{path with spaces}} to attach a project file.\nUse @path:10-30 for selected lines.\nFull skill text is loaded only on invocation or read_skill.\n/compact archives older context before reducing it.\nByte counts describe content, not exact model tokens.",self.session.messages.len(),serde_json::to_vec(&self.session.messages)?.len()/1000,self.session.entries.len(),self.session.pending.len(),rules.iter().map(|r|r.path.display().to_string()).collect::<Vec<_>>().join("\n"),catalog.skills.len(),catalog.prompts.len(),self.session.work.skills.join("\n"),self.session.work.context_files.join("\n")));},
+   "/skills"=>{if arg.is_empty(){self.show_resources(true)}else{let v=crate::context::discover(&self.cfg.project).read_skill(arg,"SKILL.md",true)?;self.info("Skills beside 弄玉",format!("{}\n\n{}\n\n/skill {} request · invoke",v["directory"].as_str().unwrap_or(""),v["content"].as_str().unwrap_or(""),arg));}},
+   "/prompts"=>self.show_resources(false),
+   "/skill"|"/prompt"=>{if arg.is_empty(){bail!("Add a resource name and your request")};let invocation=format!("{cmd} {arg}");crate::context::prepare(&self.cfg.project,&invocation,&crate::context::discover(&self.cfg.project))?;self.submit(invocation)?;},
+   "/reload"=>{let rules=instructions::load(&self.cfg.project)?;let catalog=crate::context::discover(&self.cfg.project);self.info("Project resources refreshed",format!("{} AGENTS.md files · {} skills · {} prompts\n\nResources are also reloaded at the start of each turn.\n{}",rules.len(),catalog.skills.len(),catalog.prompts.len(),catalog.warnings.join("\n")));},
    "/steer"=>self.enqueue(arg.into(),Delivery::Steer)?,
    "/follow"=>self.enqueue(arg.into(),Delivery::FollowUp)?,
    "/queue"=>{let text=if self.session.pending.is_empty(){"No messages waiting.\n\nWhile working: Enter adds a direction; Alt+Enter queues the next task.\n/steer MESSAGE · /follow MESSAGE".into()}else{format!("{}\n\n/next runs the next message when idle.\n/drop ID removes a waiting message.\nStopping preserves the queue; it does not run automatically after an error or restart.",self.session.pending.iter().map(|m|format!("{} · {}\n{}\n",m.id,if m.delivery==Delivery::Steer{"direction"}else{"next task"},m.text)).collect::<Vec<_>>().join("\n"))};self.info("Messages waiting for 弄玉",text);},
@@ -452,6 +472,45 @@ impl App {
             )
         };
         self.info("Working together · 弄玉", text);
+    }
+    fn show_resources(&mut self, skills: bool) {
+        if matches!(
+            self.popup,
+            Some(Popup::Approval(_) | Popup::Question { .. } | Popup::Redirect { .. })
+        ) {
+            self.notify("Finish the pending decision first, or use Ctrl+G to redirect.");
+            return;
+        }
+        let catalog = crate::context::discover(&self.cfg.project);
+        let items = if skills {
+            &catalog.skills
+        } else {
+            &catalog.prompts
+        };
+        if items.is_empty() {
+            self.info(
+                if skills {
+                    "Skills beside 弄玉"
+                } else {
+                    "Reusable prompts"
+                },
+                catalog.describe(skills),
+            );
+            return;
+        }
+        if !catalog.warnings.is_empty() {
+            self.notify(format!(
+                "{} discovery notes · /reload to inspect",
+                catalog.warnings.len()
+            ));
+        }
+        self.popup = Some(Popup::Resources {
+            items: items.clone(),
+            skills,
+            query: String::new(),
+            index: 0,
+        });
+        self.last_image = None;
     }
     fn enqueue(&mut self, text: String, delivery: Delivery) -> Result<()> {
         if text.trim().is_empty() {
@@ -742,6 +801,73 @@ impl App {
         }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::Resources {
+                    items,
+                    skills,
+                    mut query,
+                    mut index,
+                } => {
+                    let filtered = items
+                        .iter()
+                        .filter(|r| {
+                            format!("{} {}", r.name, r.description)
+                                .to_lowercase()
+                                .contains(&query.to_lowercase())
+                        })
+                        .collect::<Vec<_>>();
+                    match key.code {
+                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Down => index = (index + 1).min(filtered.len().saturating_sub(1)),
+                        KeyCode::Up => index = index.saturating_sub(1),
+                        KeyCode::Enter => {
+                            if let Some(resource) = filtered.get(index) {
+                                self.input_set(format!(
+                                    "/{} {} ",
+                                    if skills { "skill" } else { "prompt" },
+                                    resource.name
+                                ));
+                                self.notify("Add your request, then Enter to send");
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::F(1) => {
+                            if let Some(resource) = filtered.get(index) {
+                                let catalog = crate::context::discover(&self.cfg.project);
+                                let text = if skills {
+                                    catalog.read_skill(&resource.name, "SKILL.md", true)?["content"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string()
+                                } else {
+                                    catalog.prompt(&resource.name, "$ARGUMENTS")?
+                                };
+                                self.info(
+                                    &format!("Resource · {}", resource.name),
+                                    format!("{}\n\n{text}", resource.path.display()),
+                                );
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            index = 0;
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && query.len() < 160 =>
+                        {
+                            query.push(c);
+                            index = 0;
+                        }
+                        _ => {}
+                    }
+                    self.popup = Some(Popup::Resources {
+                        items,
+                        skills,
+                        query,
+                        index,
+                    });
+                }
                 Popup::Redirect {
                     mut input,
                     previous,
@@ -1217,9 +1343,15 @@ impl App {
         if let Some(popup) = &self.popup {
             let decision = matches!(
                 popup,
-                Popup::Approval(_) | Popup::Question { .. } | Popup::Redirect { .. }
-            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting"));
+                Popup::Approval(_)
+                    | Popup::Question { .. }
+                    | Popup::Redirect { .. }
+                    | Popup::Resources { .. }
+            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside"));
             let side_by_side = decision && pet_width > 0 && chat.width >= 42;
+            if matches!(popup, Popup::Resources { .. }) {
+                f.render_widget(Block::default().style(style(FG)), chat);
+            }
             if !side_by_side {
                 self.image_area = Rect::default();
             }
@@ -1429,7 +1561,16 @@ impl App {
             {
                 lines.push(line(text, FG));
             }
-            lines.push(line("", DIM));
+            if let Some(skill) = work.skills.last() {
+                lines.push(line(format!("Using · {skill}"), JADE));
+            } else if !work.context_files.is_empty() {
+                lines.push(line(
+                    format!("{} attached files · /context", work.context_files.len()),
+                    DIM,
+                ));
+            } else {
+                lines.push(line("", DIM));
+            }
             if !work.steps.is_empty() {
                 lines.push(line(
                     format!(
@@ -1474,7 +1615,12 @@ impl App {
     }
     fn draw_popup(f: &mut Frame, p: &Popup, area: Rect) {
         let width = area.width.saturating_sub(4).min(88);
-        let height = area.height.saturating_sub(4).min(28);
+        let desired_height = if let Popup::Resources { items, .. } = p {
+            11 + 3 * items.len().min(5) as u16
+        } else {
+            28
+        };
+        let height = area.height.saturating_sub(4).min(desired_height);
         let r = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -1494,6 +1640,7 @@ impl App {
             vertical: 2,
         });
         let (title,text,scroll)=match p{
+   Popup::Resources{items,skills,query,index}=>{let filtered=items.iter().filter(|r|format!("{} {}",r.name,r.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();let visible=(inner.height.saturating_sub(6)/3).max(1) as usize;let mut text=format!("Find: {query}\n\n");for (i,r) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){text+=&format!("{} {}{}\n  {}\n\n",if i==*index{"›"}else{" "},r.name,if r.manual_only{" · explicit only"}else{""},{let lines=wrap_prose(&r.description.replace('\n'," "),inner.width.saturating_sub(4) as usize);format!("{}{}",lines.first().cloned().unwrap_or_default(),if lines.len()>1{"…"}else{""})});}if filtered.is_empty(){text+="No matching resources.\n";}text+="\n↑↓ choose · Enter prepare · F1 inspect · Esc close";(if *skills{"Skills beside 弄玉"}else{"Reusable prompts"}.into(),text,0)},
    Popup::Redirect{input,..}=>("弄玉 · change direction".into(),format!("Tell me what to change.\nPending actions will be cancelled when you send.\n\n› {input}\n\nEnter send · Esc return to the decision"),0),
    Popup::Question{question,options,input,..}=>("弄玉 · a question for you".into(),format!("{}\n\n{}\n\nOr type an answer:\n› {}",question,options.iter().enumerate().map(|(i,o)|format!("[{}] {o}",i+1)).collect::<Vec<_>>().join("\n"),input),0),
    Popup::Info{title,text,scroll}=>(title.clone(),text.clone(),*scroll),
@@ -1659,6 +1806,9 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
 }
 pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()> {
     let mut app = App::new(cfg, cli.clone(), store)?;
+    if let Some(panel) = &cli.preview_panel {
+        app.command(&format!("/{panel}"))?;
+    }
     let start = Instant::now();
     while app.companion.is_some() {
         app.tick()?;

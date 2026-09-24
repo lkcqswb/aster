@@ -1,3 +1,13 @@
+# Skills and project context 0.5 — 2026-09-24
+
+- **39 Rust tests passed**, with YAML metadata/precedence, lazy skill loading, explicit-only skills, supporting-file boundaries, selected-line attachments, scoped project rules and readable-transcript/provider-context separation. Formatting, Clippy with warnings denied and the release build passed.
+- The offline PTY context test passed: searching/preparing a skill without a model call, explicit invocation, exact attached lines, context inspection, prompt expansion, reload, compact resize and zero-status exit. The general session/command/approval/fork terminal regression also passed. Evidence: `.aster/qa/context-e2e.json`.
+- One live MiniMax task loaded a skill with `read_skill`, read `refs/proof.txt` through that tool, combined it with line 2 of an attached input, and wrote exactly `{"value":7,"proof":"nongyu-context-486"}`. Only the expected write was approved; the JSON check passed. Session `8b0bb4133255`: **5 model requests, 4 tools, 4,283 input tokens, 435 output tokens**, exit 0. Evidence: `.aster/qa/context-live.json`.
+- An earlier attempt caught a sentence-punctuation bug in `@input.txt:2.` during local preparation: **zero tools and zero provider tokens**. The parser and its regression test were corrected before the successful live task. No provider failure was retried.
+- A read-only `--preview-panel` option supports actual-layout SVG inspection of skills, prompts, context, work and review. Model assets and all local QA/session output remain excluded from Git.
+
+---
+
 # Steering and durable messages 0.4 — 2026-09-24
 
 - **34 Rust tests passed**, including steering before execution, cancelling an unapproved write, preserving provider tool/result pairs, direction-box cancellation, saved follow-ups across stop/resume, and excluding unexecuted actions from check evidence. Formatting, Clippy with warnings denied and the release build passed.

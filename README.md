@@ -88,6 +88,10 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/compact` | Archive full context; retain four recent exchanges and a local excerpt |
 | `/export` | Export a readable Markdown transcript |
 | `/delete` | Confirm removal of the current saved conversation |
+| `/context` | Inspect model context, loaded skills and attached files |
+| `/skills`, `/skill NAME request` | Find, inspect and apply a reusable skill |
+| `/prompts`, `/prompt NAME args` | Browse and use reusable task prompts |
+| `/reload` | Refresh and inspect project resource discovery |
 | `/agents` | Inspect the AGENTS.md files loaded for this project |
 | `/init` | Create a small AGENTS.md starter, without replacing an existing one |
 | `/plan`, `/build` | Switch between reading/planning and work with tools |
@@ -116,7 +120,9 @@ Sessions live in `~/.local/share/aster`, with private files, atomic writes and a
 
 Aster loads `~/.config/aster/AGENTS.md`, followed by ancestor `AGENTS.md` files from broad to narrow scope. Use `/agents` to see exactly which files were included. When a file tool reaches a nested directory with new guidance, that guidance is returned to the model before the operation is retried. Instruction loading is bounded by file size.
 
-The tools are `list_files`, `read_file`, `search`, `write_file`, `edit_file`, `shell`, `check_file`, `update_plan` and `ask_user`. File tools reject path traversal, symlinks and credential/private directories. Reads and writes are capped at 128 KB, file lists at 800 entries and searches at 100 matching lines. `read_file` returns numbered lines, with a one-based offset and up to 500 lines per call (200 by default).
+Attach project context with `@path`, `@path:10-30` or `@{path with spaces}`. Skills load on demand from personal or project directories; the searchable picker stays beside 弄玉, and her work card records which skill is in use. [Context, skills and prompt templates](docs/CONTEXT.md) explains limits, locations and examples.
+
+The tools are `read_skill`, `list_files`, `read_file`, `search`, `write_file`, `edit_file`, `shell`, `check_file`, `update_plan` and `ask_user`. File tools reject path traversal, symlinks and credential/private directories. Reads and writes are capped at 128 KB, file lists at 800 entries and searches at 100 matching lines. `read_file` returns numbered lines, with a one-based offset and up to 500 lines per call (200 by default).
 
 `edit_file` replaces a single exact occurrence and rejects ambiguous matches. File edits are prepared before approval, displayed as a diff, and committed atomically only if the file still matches the reviewed version. Intervening user edits are preserved. `update_plan` reports progress; it cannot manufacture verification evidence. `ask_user` waits for a numbered choice or a typed answer, and returns that answer to the model before dependent work continues.
 

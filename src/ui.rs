@@ -49,6 +49,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/rename", "Name this conversation"),
     ("/fork", "Branch the conversation"),
     ("/model", "Choose live MiniMax or demo"),
+    (
+        "/history",
+        "Search and revisit earlier conversation entries",
+    ),
     ("/context", "Inspect model context and attached files"),
     ("/skills", "Inspect available project and personal skills"),
     ("/skill", "Use a skill by name"),
@@ -158,6 +162,84 @@ fn wrap_prose(text: &str, width: usize) -> Vec<String> {
     result
 }
 
+fn entry_lines(e: &Entry, width: usize, show_tools: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![];
+
+    if e.role == "tool"
+        && !show_tools
+        && (e.text.starts_with("update_plan ") || e.text.starts_with("ask_user "))
+    {
+        return lines;
+    }
+    let (label, color) = match e.role.as_str() {
+        "you" => ("YOU", DIM),
+        "nongyu" => ("弄玉", JADE),
+        "tool" => ("", DIM),
+        _ => ("•", GOLD),
+    };
+    if e.role == "tool" {
+        let first = e.text.lines().next().unwrap_or("");
+        let failed = first.contains("failed");
+        lines.push(line(
+            format!("  {} {}", if failed { "!" } else { "·" }, clean(first)),
+            if failed { RED } else { DIM },
+        ));
+        if show_tools {
+            for text in wrap(&e.text, width.saturating_sub(3)).into_iter().skip(1) {
+                lines.push(line(format!("    {text}"), DIM));
+            }
+        }
+        lines.push(line("", FG));
+        return lines;
+    }
+    lines.push(line(label, color));
+    for text in wrap_prose(&e.text, width) {
+        lines.push(line(
+            format!("  {text}"),
+            if e.role == "notice" { GOLD } else { FG },
+        ));
+    }
+    lines.push(line("", FG));
+    lines
+}
+#[derive(Default)]
+struct TranscriptLayout {
+    key: Option<(String, String, usize, bool, usize)>,
+    lines: Vec<Line<'static>>,
+    starts: Vec<usize>,
+    rendered_total: usize,
+}
+impl TranscriptLayout {
+    fn update(&mut self, session: &Session, width: usize, show_tools: bool) -> bool {
+        if self
+            .key
+            .as_ref()
+            .is_some_and(|(id, stamp, w, tools, count)| {
+                id == &session.id
+                    && stamp == &session.updated
+                    && *w == width
+                    && *tools == show_tools
+                    && *count == session.entries.len()
+            })
+        {
+            return false;
+        }
+        self.lines.clear();
+        self.starts.clear();
+        for entry in &session.entries {
+            self.starts.push(self.lines.len());
+            self.lines.extend(entry_lines(entry, width, show_tools));
+        }
+        self.key = Some((
+            session.id.clone(),
+            session.updated.clone(),
+            width,
+            show_tools,
+            session.entries.len(),
+        ));
+        true
+    }
+}
 struct Approval {
     tool: String,
     preview: String,
@@ -165,6 +247,7 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    History(crate::history::History),
     Actions(crate::actions::Menu),
     Project(Box<crate::navigator::Navigator>),
     Resources {
@@ -209,6 +292,8 @@ pub struct App {
     // Keep one decision alive while read-only views replace each other.
     inspection_return: Option<Box<Popup>>,
     scroll: usize,
+    transcript: TranscriptLayout,
+    jump_to: Option<usize>,
     selection: usize,
     show_tools: bool,
     companion: Option<Companion>,
@@ -271,6 +356,8 @@ impl App {
             popup: None,
             inspection_return: None,
             scroll: 0,
+            transcript: TranscriptLayout::default(),
+            jump_to: None,
             selection: 0,
             show_tools: false,
             companion,
@@ -402,7 +489,9 @@ impl App {
     }
     fn paste(&mut self, text: &str) {
         let text = clean(text);
-        if let Some(Popup::Actions(menu)) = &mut self.popup {
+        if let Some(Popup::History(history)) = &mut self.popup {
+            history.paste(&text);
+        } else if let Some(Popup::Actions(menu)) = &mut self.popup {
             menu.paste(&text);
         } else if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.paste(&text);
@@ -484,6 +573,7 @@ impl App {
                 | "/follow"
                 | "/queue"
                 | "/context"
+                | "/history"
                 | "/checkpoint"
                 | "/skills"
                 | "/files"
@@ -505,6 +595,7 @@ impl App {
    "/queue"=>{let text=if self.session.pending.is_empty(){"No messages waiting.\n\nWhile working: Enter adds a direction; Alt+Enter queues the next task.\n/steer MESSAGE · /follow MESSAGE".into()}else{format!("{}\n\n/next runs the next message when idle.\n/drop ID removes a waiting message.\nStopping preserves the queue; it does not run automatically after an error or restart.",self.session.pending.iter().map(|m|format!("{} · {}\n{}\n",m.id,if m.delivery==Delivery::Steer{"direction"}else{"next task"},m.text)).collect::<Vec<_>>().join("\n"))};self.info("Messages waiting for 弄玉",text);},
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
+   "/history"=>self.inspect(Popup::History(crate::history::History::new(&self.session,arg.into()))),
    "/together"=>self.show_actions(),
    "/work"=>self.show_work(),
    "/files"|"/find"=>self.inspect(Popup::Project(Box::new(crate::navigator::Navigator::new(self.cfg.project.clone(),if cmd=="/files"{crate::navigator::Mode::Files}else{crate::navigator::Mode::Search},arg.into())))),
@@ -751,6 +842,9 @@ impl App {
         }
     }
     fn tick(&mut self) -> Result<()> {
+        if let Some(Popup::History(history)) = &mut self.popup {
+            history.refresh(&self.session);
+        }
         if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.tick();
         }
@@ -917,7 +1011,9 @@ impl App {
             } else {
                 self.state.as_str()
             }
-        } else if matches!(&self.popup,Some(Popup::Project(nav)) if nav.reading() || nav.busy()) {
+        } else if matches!(&self.popup,Some(Popup::Project(nav)) if nav.reading() || nav.busy())
+            || matches!(&self.popup, Some(Popup::History(history)) if history.preview)
+        {
             "reading"
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
@@ -970,6 +1066,10 @@ impl App {
             }
             return Ok(());
         }
+        if key.code == KeyCode::F(7) {
+            self.command("/history")?;
+            return Ok(());
+        }
         if key.code == KeyCode::F(2) {
             self.show_work();
             return Ok(());
@@ -992,6 +1092,24 @@ impl App {
         }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::History(mut history) => {
+                    match history.key(key) {
+                        crate::history::Action::Keep => self.popup = Some(Popup::History(history)),
+                        crate::history::Action::Close => {}
+                        crate::history::Action::Jump(entry) => {
+                            if self.inspection_return.is_some() {
+                                self.notify("A decision is still pending. Enter reads the selected entry here.");
+                                self.popup = Some(Popup::History(history));
+                            } else {
+                                if history.items[entry].role == "tool" {
+                                    self.show_tools = true;
+                                }
+                                self.jump_to = Some(entry);
+                                self.notify("Earlier conversation · Page Down reads on · Ctrl+End returns to latest");
+                            }
+                        }
+                    }
+                }
                 Popup::Actions(mut menu) => {
                     let filtered = menu.filtered();
                     match key.code {
@@ -1299,6 +1417,11 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
+                KeyCode::End => {
+                    self.scroll = 0;
+                    self.jump_to = None;
+                    self.notice.clear();
+                }
                 KeyCode::Char('p') => {
                     if !self.busy_guard() {
                         self.popup = Some(Popup::Sessions {
@@ -1616,11 +1739,12 @@ impl App {
             }
         }
         self.action_rows.clear();
-        if let Some(popup) = &self.popup {
+        if let Some(popup) = &mut self.popup {
             let decision = matches!(
                 popup,
                 Popup::Approval(_)
                     | Popup::Actions(_)
+                    | Popup::History(_)
                     | Popup::Project(_)
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
@@ -1678,67 +1802,60 @@ impl App {
             }
         }
     }
-    fn conversation(&self, f: &mut Frame, r: Rect) {
-        let mut lines = vec![];
+    fn conversation(&mut self, f: &mut Frame, r: Rect) {
         let width = r.width.saturating_sub(2) as usize;
-        let mut entries = self.session.entries.clone();
-        if !self.stream.is_empty() {
-            entries.push(Entry {
-                role: "nongyu".into(),
-                text: self.stream.clone(),
-            });
-        }
-        for e in entries {
-            if e.role == "tool"
-                && !self.show_tools
-                && (e.text.starts_with("update_plan ") || e.text.starts_with("ask_user "))
-            {
-                continue;
-            }
-            let (label, color) = match e.role.as_str() {
-                "you" => ("YOU", DIM),
-                "nongyu" => ("弄玉", JADE),
-                "tool" => ("", DIM),
-                _ => ("•", GOLD),
-            };
-            if e.role == "tool" {
-                let first = e.text.lines().next().unwrap_or("");
-                let failed = first.contains("failed");
-                lines.push(line(
-                    format!("  {} {}", if failed { "!" } else { "·" }, clean(first)),
-                    if failed { RED } else { DIM },
-                ));
-                if self.show_tools {
-                    for text in wrap(&e.text, width.saturating_sub(3)).into_iter().skip(1) {
-                        lines.push(line(format!("    {text}"), DIM));
-                    }
-                }
-                lines.push(line("", FG));
-                continue;
-            }
-            lines.push(line(label, color));
-            for text in wrap_prose(&e.text, width) {
-                lines.push(line(
-                    format!("  {text}"),
-                    if e.role == "notice" { GOLD } else { FG },
-                ));
-            }
-            lines.push(line("", FG));
-        }
+        let same_layout = self
+            .transcript
+            .key
+            .as_ref()
+            .is_some_and(|(id, _, w, _, _)| id == &self.session.id && *w == width);
+        self.transcript
+            .update(&self.session, width, self.show_tools);
+        let mut tail = if self.stream.is_empty() {
+            vec![]
+        } else {
+            entry_lines(
+                &Entry {
+                    role: "nongyu".into(),
+                    text: self.stream.clone(),
+                },
+                width,
+                self.show_tools,
+            )
+        };
         if self.running.is_some() && self.stream.is_empty() {
             let ticks = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
             let i =
                 (chrono::Utc::now().timestamp_millis() / 120).unsigned_abs() as usize % ticks.len();
-            lines.push(line(format!("{} 弄玉 · {}", ticks[i], self.state), JADE));
+            tail.push(line(format!("{} 弄玉 · {}", ticks[i], self.state), JADE));
         }
-        let max = lines.len().saturating_sub(r.height as usize);
+        let total = self.transcript.lines.len() + tail.len();
+        if self.scroll > 0 && same_layout {
+            self.scroll = if total >= self.transcript.rendered_total {
+                self.scroll
+                    .saturating_add(total - self.transcript.rendered_total)
+            } else {
+                self.scroll
+                    .saturating_sub(self.transcript.rendered_total - total)
+            };
+        }
+        self.transcript.rendered_total = total;
+        let max = total.saturating_sub(r.height as usize);
+        if let Some(entry) = self.jump_to.take()
+            && let Some(start) = self.transcript.starts.get(entry)
+        {
+            self.scroll = max.saturating_sub(*start);
+        }
         let start = max.saturating_sub(self.scroll);
         f.render_widget(
             Paragraph::new(
-                lines
-                    .into_iter()
+                self.transcript
+                    .lines
+                    .iter()
+                    .chain(tail.iter())
                     .skip(start)
                     .take(r.height as usize)
+                    .cloned()
                     .collect::<Vec<_>>(),
             ),
             r,
@@ -1760,6 +1877,8 @@ impl App {
             "reading together"
         } else if matches!(&self.popup, Some(Popup::Project(_))) {
             "finding the right context"
+        } else if matches!(self.popup, Some(Popup::History(_))) {
+            "looking back together"
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
         } else if self.session.work.has_failures() {
@@ -1927,7 +2046,7 @@ impl App {
     }
     fn draw_popup(
         f: &mut Frame,
-        p: &Popup,
+        p: &mut Popup,
         returning: bool,
         area: Rect,
     ) -> Vec<(Rect, crate::actions::Action)> {
@@ -2024,6 +2143,31 @@ impl App {
             return rows;
         }
         let (title,text,scroll)=match p{
+   Popup::History(history)=>{
+       if history.preview && let Some(entry)=history.selected() {
+           let item=&history.items[entry];
+           let wrapped=wrap_prose(&item.text,inner.width as usize);
+           if history.focus_match {
+               let needle=history.needle();
+               history.scroll=if needle.is_empty(){0}else{wrapped.iter().position(|line|line.to_lowercase().contains(&needle)).unwrap_or(0).saturating_sub(2).min(u16::MAX as usize) as u16};
+               history.focus_match=false;
+           }
+           history.scroll=history.scroll.min(wrapped.len().saturating_sub(inner.height.saturating_sub(4) as usize).min(u16::MAX as usize) as u16);
+           (format!("Conversation #{} · {}",entry+1,item.role),wrapped.join("\n"),history.scroll)
+       } else {
+           let query=wrap(&format!("Find: {}",history.query),inner.width as usize).first().cloned().unwrap_or_default();
+           let mut text=format!("{query}\nFilter: you: · nongyu: · tool: · notice:\n\n");
+           let visible=(inner.height.saturating_sub(7)/3).max(1) as usize;
+           for (index,&entry) in history.matches.iter().enumerate().skip(history.index.saturating_sub(visible-1)).take(visible) {
+               let item=&history.items[entry];
+               let excerpt=wrap_prose(&item.text.replace('\n'," "),inner.width.saturating_sub(4) as usize).first().cloned().unwrap_or_default();
+               text+=&format!("{} #{} · {}\n  {}\n\n",if index==history.index{"›"}else{" "},entry+1,item.role,excerpt);
+           }
+           if history.matches.is_empty(){text+="No matching conversation entries.\n";}
+           text+=&format!("{} match{} · visible transcript only",history.matches.len(),if history.matches.len()==1{""}else{"es"});
+           ("History beside 弄玉".into(),text,0)
+       }
+   },
    Popup::Actions(_)=>unreachable!("Action menu is rendered above"),
    Popup::Project(nav)=>nav.view(inner.width as usize,inner.height as usize),
    Popup::Resources{items,skills,query,index}=>{let filtered=items.iter().filter(|r|format!("{} {}",r.name,r.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();let visible=(inner.height.saturating_sub(6)/3).max(1) as usize;let mut text=format!("Find: {query}\n\n");for (i,r) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){text+=&format!("{} {}{}\n  {}\n\n",if i==*index{"›"}else{" "},r.name,if r.manual_only{" · explicit only"}else{""},{let lines=wrap_prose(&r.description.replace('\n'," "),inner.width.saturating_sub(4) as usize);format!("{}{}",lines.first().cloned().unwrap_or_default(),if lines.len()>1{"…"}else{""})});}if filtered.is_empty(){text+="No matching resources.\n";}text+="\n↑↓ choose · Enter prepare · F1 inspect · Esc close";(if *skills{"Skills beside 弄玉"}else{"Reusable prompts"}.into(),text,0)},
@@ -2032,7 +2176,7 @@ impl App {
    Popup::Info{title,text,scroll}=>(title.clone(),text.clone(),*scroll),
    Popup::Approval(a)=>(format!("Allow {}?",a.tool),a.preview.clone(),a.scroll),
    Popup::Delete=>("Delete this conversation?".into(),"The saved conversation will be removed.\nProject files stay in place.\n\n[y] delete    [n] keep    Esc cancels".into(),0),
-   Popup::Sessions{items,query,index}=>{let filtered=items.iter().filter(|s|s.title.to_lowercase().contains(&query.to_lowercase())||s.id.contains(query)).collect::<Vec<_>>();let mut text=format!("Find: {query}\n\n");for (i,s) in filtered.iter().enumerate().skip(index.saturating_sub((inner.height.saturating_sub(6)/2).max(1) as usize-1)).take((inner.height.saturating_sub(6)/2).max(1) as usize){text+=&format!("{} {}\n  {}  ·  {}\n",if i==*index{"›"}else{" "},s.title,&s.id[..6],if s.demo{"demo"}else{&s.model});}if filtered.is_empty(){text+="No matching sessions.\n"}text+="\n↑↓ choose    Enter resume    Esc close";("Your conversations".into(),text,0)}
+   Popup::Sessions{items,query,index}=>{let filtered=items.iter().filter(|s|s.title.to_lowercase().contains(&query.to_lowercase())||s.id.contains(query.as_str())).collect::<Vec<_>>();let mut text=format!("Find: {query}\n\n");for (i,s) in filtered.iter().enumerate().skip(index.saturating_sub((inner.height.saturating_sub(6)/2).max(1) as usize-1)).take((inner.height.saturating_sub(6)/2).max(1) as usize){text+=&format!("{} {}\n  {}  ·  {}\n",if i==*index{"›"}else{" "},s.title,&s.id[..6],if s.demo{"demo"}else{&s.model});}if filtered.is_empty(){text+="No matching sessions.\n"}text+="\n↑↓ choose    Enter resume    Esc close";("Your conversations".into(),text,0)}
   };
         f.render_widget(
             Paragraph::new(title).style(style(JADE).add_modifier(Modifier::BOLD)),
@@ -2050,6 +2194,17 @@ impl App {
                 inner.height.saturating_sub(3),
             ),
         );
+        if let Popup::History(history) = p {
+            f.render_widget(
+                Paragraph::new(if history.preview {
+                    "↑↓ scroll · Tab jump · Esc results"
+                } else {
+                    "↑↓ choose · Enter read · Tab jump · Esc close"
+                })
+                .style(style(DIM)),
+                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            );
+        }
         if returning {
             f.render_widget(
                 Paragraph::new("Decision still waiting · Esc back · Ctrl+G redirect")
@@ -2485,6 +2640,114 @@ mod layout_tests {
         assert!(
             matches!(&a.popup, Some(Popup::Info { title, text, .. }) if title.starts_with("Checks beside") && text.contains("earlier result"))
         );
+    }
+    #[test]
+    fn history_preview_opens_near_the_match_and_home_reads_the_beginning() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        let mut text = (0..300)
+            .map(|i| format!("original line {i}\n"))
+            .collect::<String>();
+        text.push_str("needle-history-deep\nlast line\n");
+        a.session.add("nongyu", text);
+        a.command("/history needle-history-deep").unwrap();
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(132, 42)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+                .contains("needle-history-deep")
+        );
+        a.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let visible = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(visible.contains("original line 0"));
+        assert!(!visible.contains("needle-history-deep"));
+    }
+    #[test]
+    fn transcript_layout_reuses_idle_frames_and_invalidates_after_changes() {
+        let mut session = Session::new("/project".into(), "test".into(), true);
+        session.add(
+            "you",
+            "A long line with Unicode 中文 and enough words to wrap.",
+        );
+        session.add("tool", "read_file source.txt\nVisible tool output");
+        let mut layout = TranscriptLayout::default();
+        assert!(layout.update(&session, 30, false));
+        let initial = layout.lines.len();
+        for _ in 0..100 {
+            assert!(!layout.update(&session, 30, false));
+        }
+        assert!(layout.update(&session, 30, true));
+        assert!(layout.lines.len() > initial);
+        assert!(layout.update(&session, 60, true));
+        session.add("nongyu", "A new reply.");
+        assert!(layout.update(&session, 60, true));
+        assert_eq!(layout.starts.len(), 3);
+    }
+    #[test]
+    fn history_jump_keeps_the_draft_and_stays_put_when_new_entries_arrive() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        for index in 0..100 {
+            a.session.add(
+                "you",
+                format!("Earlier request number {index} with its original details."),
+            );
+        }
+        a.input_set("Keep my next request");
+        a.command("/history number 20 ").unwrap();
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&a.popup,Some(Popup::History(history)) if history.preview));
+        a.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(132, 42)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let before = terminal.backend().buffer().clone();
+        assert!(
+            before
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+                .contains("Earlier request number 20")
+        );
+        a.session.add(
+            "nongyu",
+            "A later message that should not move the history viewport.",
+        );
+        terminal.draw(|f| a.draw(f)).unwrap();
+        assert_eq!(terminal.backend().buffer(), &before);
+        a.key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))
+            .unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+                .contains("A later message that should not move")
+        );
+        assert_eq!(a.input, "Keep my next request");
+        assert!(a.session.messages.is_empty());
     }
     #[test]
     fn checkpoint_archive_failure_leaves_the_active_and_saved_context_intact() {

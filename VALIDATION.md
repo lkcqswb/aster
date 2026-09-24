@@ -1,3 +1,9 @@
+# Conversation history and transcript layout 0.15 — 2026-09-24
+
+- **79 Rust tests passed**, formatting, strict Clippy and release build passed. Coverage checks Unicode/role search, appended history, exclusion of provider thinking, cached idle layouts, invalidation after changes, near-match previews, draft-preserving jumps and a stable viewport when new entries arrive.
+- Real animated terminal with **1,200 visible entries**: opening and filtering history took **468 ms on this machine**. It read the full selected entry, jumped to it, returned to the latest messages, kept the composer draft and inspected history while preserving a pending question. **30 distinct frames**, zero API calls, exit 0. Evidence: `.aster/qa/history-e2e.json`. The initial driver expectation was corrected to tolerate a wrapped sentence; the displayed content was complete.
+- The general terminal regression passed. The cache avoids reformatting unchanged transcript entries on idle animation frames; the timing above measures the fixture interaction, not a cross-machine performance guarantee.
+
 # Recoverable context checkpoints 0.14 — 2026-09-24
 
 - **75 Rust tests passed**; formatting, strict Clippy and release build passed. Coverage includes oversized single exchanges, exact retained tool/thinking blocks, repeated checkpoints, incomplete tool batches, failed writes, archive failure, cross-project restore rejection, private archive permissions and context preflight request counts.

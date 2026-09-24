@@ -113,6 +113,11 @@ fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
         );
     }
     add(
+        Action::Command("/history"),
+        "Find an earlier conversation entry",
+        "Search what we said, read it or jump back to it.",
+    );
+    add(
         Action::Command("/context"),
         "Inspect what I can see",
         "Instructions, used skills and attached references.",

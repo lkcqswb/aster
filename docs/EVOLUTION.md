@@ -69,4 +69,8 @@ Clicking the companion or pressing F1 opens searchable local actions. Command ou
 
 Recoverable local context checkpoints with a byte budget, complete tool/result boundaries, user notes, original-request excerpts and cumulative file-tool history. A single oversized exchange can now be compacted. Restore creates a new conversation with exact archived provider blocks and leaves files untouched. The companion action menu exposes the checkpoint; model-request counts exclude a locally rejected oversized request. A real MiniMax continuation recovered the saved contract, reread current source, wrote with approval and passed an exact JSON check.
 
-Next: improve navigation through conversation history and explicit recovery.
+## Delivered in 0.15
+
+Searchable visible conversation history with role filters, full entry previews, jumps to earlier entries and a return-to-latest shortcut. The draft and pending decisions survive inspection; provider thinking blocks are excluded. Transcript layout is cached between idle frames and keeps a scrolled viewport steady while messages arrive, allowing Live2D animation to continue without reformatting all earlier entries.
+
+Next: improve durable task/session navigation and explicit recovery.

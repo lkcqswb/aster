@@ -4,6 +4,7 @@ pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod edits;
+pub mod history;
 pub mod instructions;
 pub mod lifecycle;
 pub mod live2d;

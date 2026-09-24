@@ -92,6 +92,7 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/restore ID` | Restore archived provider context as a new conversation; files stay shared |
 | `/export` | Export a readable Markdown transcript |
 | `/delete` | Confirm removal of the current saved conversation |
+| `/history [query]` | Search the visible conversation; F7 opens history |
 | `/context` | Inspect model context, loaded skills and attached files |
 | `/skills`, `/skill NAME request` | Find, inspect and apply a reusable skill |
 | `/prompts`, `/prompt NAME args` | Browse and use reusable task prompts |

@@ -1,5 +1,6 @@
 use crate::{
     agent::{self, Event, Running},
+    composer::Edit,
     config::{Cli, Config},
     instructions,
     live2d::{Companion, Graphics, Shared},
@@ -21,7 +22,7 @@ use ratatui::{
     layout::{Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Clear, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
 use std::{
@@ -75,7 +76,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/queue", "Inspect waiting messages"),
     ("/next", "Run the next saved message"),
     ("/drop", "Remove a waiting message by ID"),
-    ("/compact", "Checkpoint context with an optional note"),
+    ("/compact", "Summarize older context · local · auto on|off"),
+    ("/limits", "Turn limits and the context window"),
     ("/checkpoint", "Inspect the latest context checkpoint"),
     ("/restore", "Restore archived context as a new conversation"),
     ("/export", "Save a readable transcript"),
@@ -160,55 +162,84 @@ fn wrap_prose(text: &str, width: usize) -> Vec<String> {
 
 fn entry_lines(e: &Entry, width: usize, show_tools: bool) -> Vec<Line<'static>> {
     let mut lines = vec![];
-
     if e.role == "tool"
         && !show_tools
         && (e.text.starts_with("update_plan ") || e.text.starts_with("ask_user "))
     {
         return lines;
     }
-    let (label, color) = match e.role.as_str() {
-        "you" => ("YOU", DIM),
-        "nongyu" => ("弄玉", JADE),
-        "tool" => ("", DIM),
-        _ => ("•", GOLD),
-    };
-    if e.role == "tool" {
-        let first = e.text.lines().next().unwrap_or("");
-        let failed = first.contains("failed");
-        lines.push(line(
-            format!("  {} {}", if failed { "!" } else { "·" }, clean(first)),
-            if failed { RED } else { DIM },
-        ));
-        if show_tools {
-            for text in wrap(&e.text, width.saturating_sub(3)).into_iter().skip(1) {
-                lines.push(line(format!("    {text}"), DIM));
+    match e.role.as_str() {
+        "tool" => {
+            let first = clean(e.text.lines().next().unwrap_or(""));
+            let (glyph, color) = if first.contains("failed") || first.contains("declined") {
+                ("✗", RED)
+            } else if first.contains("verified") {
+                ("✓", JADE)
+            } else if first.contains("retry required") {
+                ("◇", GOLD)
+            } else {
+                ("·", DIM)
+            };
+            let (name, rest) = first.split_once("  ").unwrap_or((first.as_str(), ""));
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {glyph} "), style(color)),
+                Span::styled(
+                    name.to_string(),
+                    style(if color == DIM { DIM } else { color }),
+                ),
+                Span::styled(
+                    format!("  {}", rest.trim_start()),
+                    style(if color == RED { RED } else { DIM }),
+                ),
+            ]));
+            if show_tools {
+                for text in wrap(&e.text, width.saturating_sub(6)).into_iter().skip(1) {
+                    lines.push(Line::from(vec![
+                        Span::styled("    │ ", style(LINE)),
+                        Span::styled(text, style(DIM)),
+                    ]));
+                }
             }
         }
-        lines.push(line("", FG));
-        return lines;
-    }
-    lines.push(line(label, color));
-    if e.role == "nongyu" {
-        for mut rendered in crate::richtext::markdown(&e.text, width) {
-            rendered.spans.insert(0, Span::styled("  ", style(FG)));
-            lines.push(rendered);
+        "nongyu" => {
+            lines.push(Line::from(vec![Span::styled(
+                "弄玉",
+                style(JADE).add_modifier(Modifier::BOLD),
+            )]));
+            for mut rendered in crate::richtext::markdown(&e.text, width.saturating_sub(2)) {
+                rendered.spans.insert(0, Span::styled("  ", style(FG)));
+                lines.push(rendered);
+            }
+            lines.push(line("", FG));
         }
-        lines.push(line("", FG));
-        return lines;
+        "you" => {
+            for text in wrap_prose(&e.text, width.saturating_sub(3)) {
+                lines.push(Line::from(vec![
+                    Span::styled("▍ ", style(GOLD)),
+                    Span::styled(text, style(FG)),
+                ]));
+            }
+            lines.push(line("", FG));
+        }
+        _ => {
+            for (i, text) in wrap_prose(&e.text, width.saturating_sub(4))
+                .into_iter()
+                .enumerate()
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(if i == 0 { "  ※ " } else { "    " }, style(GOLD)),
+                    Span::styled(text, style(GOLD)),
+                ]));
+            }
+            lines.push(line("", FG));
+        }
     }
-    for text in wrap_prose(&e.text, width) {
-        lines.push(line(
-            format!("  {text}"),
-            if e.role == "notice" { GOLD } else { FG },
-        ));
-    }
-    lines.push(line("", FG));
     lines
 }
 #[derive(Default)]
 struct TranscriptLayout {
     key: Option<(String, String, usize, bool, usize)>,
+    after_tool: bool,
     lines: Vec<Line<'static>>,
     starts: Vec<usize>,
     rendered_total: usize,
@@ -230,9 +261,18 @@ impl TranscriptLayout {
         }
         self.lines.clear();
         self.starts.clear();
+        self.after_tool = false;
         for entry in &session.entries {
+            let lines = entry_lines(entry, width, show_tools);
+            // Tool rows sit together; leave a breath before the next message.
+            if !lines.is_empty() && self.after_tool && entry.role != "tool" {
+                self.lines.push(line("", FG));
+            }
             self.starts.push(self.lines.len());
-            self.lines.extend(entry_lines(entry, width, show_tools));
+            if !lines.is_empty() {
+                self.after_tool = entry.role == "tool";
+            }
+            self.lines.extend(lines);
         }
         self.key = Some((
             session.id.clone(),
@@ -286,6 +326,8 @@ enum Popup {
         items: Vec<Session>,
         query: String,
         index: usize,
+        /// A session ID awaiting delete confirmation.
+        confirm: Option<String>,
     },
     Delete,
     Approval(Approval),
@@ -295,14 +337,18 @@ pub struct App {
     cli: Cli,
     store: Store,
     pub session: Session,
-    input: String,
-    cursor: usize,
+    composer: crate::composer::Editor,
+    prompts: crate::composer::PromptHistory,
+    composer_width: usize,
     stream: String,
     running: Option<Running>,
     popup: Option<Popup>,
     // Keep one decision alive while read-only views replace each other.
     inspection_return: Option<Box<Popup>>,
+    /// Lines scrolled up from the latest message; 0 follows new output.
     scroll: usize,
+    scroll_max: usize,
+    page: usize,
     transcript: TranscriptLayout,
     jump_to: Option<usize>,
     selection: usize,
@@ -319,6 +365,12 @@ pub struct App {
     last_type: Instant,
     reaction: Option<(String, Instant)>,
     notice: String,
+    notice_at: Instant,
+    esc_at: Option<Instant>,
+    suggestions_hidden: bool,
+    turn_started: Option<Instant>,
+    cell_px: (f32, f32),
+    meter: Option<((String, usize, String), u64)>,
     quit: bool,
     quit_started: Option<Instant>,
 }
@@ -355,18 +407,22 @@ impl App {
         } else {
             Some(Companion::start(cfg.clone()))
         };
+        let prompts = crate::composer::PromptHistory::with(recent_prompts(&store, &session));
         Ok(Self {
             cfg,
             cli,
             store,
+            prompts,
             session,
-            input: String::new(),
-            cursor: 0,
+            composer: crate::composer::Editor::default(),
+            composer_width: 60,
             stream: String::new(),
             running: None,
             popup: None,
             inspection_return: None,
             scroll: 0,
+            scroll_max: 0,
+            page: 10,
             transcript: TranscriptLayout::default(),
             jump_to: None,
             selection: 0,
@@ -383,12 +439,19 @@ impl App {
             last_type: Instant::now() - Duration::from_secs(5),
             reaction: None,
             notice: String::new(),
+            notice_at: Instant::now(),
+            esc_at: None,
+            suggestions_hidden: false,
+            turn_started: None,
+            cell_px: cell_pixels(),
+            meter: None,
             quit: false,
             quit_started: None,
         })
     }
     fn notify(&mut self, text: impl Into<String>) {
         self.notice = text.into();
+        self.notice_at = Instant::now();
     }
     fn info(&mut self, title: &str, text: impl Into<String>) {
         self.inspect(Popup::Info {
@@ -494,9 +557,9 @@ impl App {
         self.store.save(&self.session)
     }
     fn input_set(&mut self, text: impl Into<String>) {
-        self.input = text.into();
-        self.cursor = self.input.len();
+        self.composer.set(text);
         self.selection = 0;
+        self.suggestions_hidden = false;
     }
     fn paste(&mut self, text: &str) {
         let text = clean(text);
@@ -524,15 +587,15 @@ impl App {
             if input.len() + text.len() <= 2000 {
                 input.push_str(&text);
             }
-        } else if self.popup.is_none() && self.input.len() + text.len() <= 32_000 {
-            self.input.insert_str(self.cursor, &text);
-            self.cursor += text.len();
+        } else if self.popup.is_none() && self.composer.text.len() + text.len() <= 32_000 {
+            self.composer.insert(&text);
+            self.prompts.reset();
             self.last_type = Instant::now();
         }
     }
     fn suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        let input = self.input.trim();
-        if !input.starts_with('/') || input.contains(' ') {
+        let input = self.composer.text.trim();
+        if self.suggestions_hidden || !input.starts_with('/') || input.contains(' ') {
             return vec![];
         };
         COMMANDS
@@ -558,7 +621,8 @@ impl App {
         if !title.is_empty() {
             self.session.title = title.into()
         }
-        self.scroll = 0;
+        self.follow_latest();
+        self.meter = None;
         self.stream.clear();
         self.state = "idle".into();
         self.persist()
@@ -596,12 +660,13 @@ impl App {
                 | "/find"
                 | "/prompts"
                 | "/drop"
+                | "/limits"
         ) && self.busy_guard()
         {
             return Ok(());
         }
         match cmd {
-   "/context"=>{let catalog=crate::context::discover(&self.cfg.project);let rules=instructions::load(&self.cfg.project)?;self.info("Context beside 弄玉",format!("{} provider messages · {} KB of saved content\n{} visible transcript entries · {} waiting messages\n\nAGENTS.md sources\n{}\n\n{} skills available · {} prompts available\n\nSkills used this turn\n{}\n\nAttached files this turn\n{}\n\nUse @path or @{{path with spaces}} to attach a project file.\nUse @path:10-30 for selected lines.\nFull skill text is loaded only on invocation or read_skill.\n/compact [note] saves a recoverable checkpoint. /checkpoint shows it.\nByte counts describe content, not exact model tokens.",self.session.messages.len(),serde_json::to_vec(&self.session.messages)?.len()/1000,self.session.entries.len(),self.session.pending.len(),rules.iter().map(|r|r.path.display().to_string()).collect::<Vec<_>>().join("\n"),catalog.skills.len(),catalog.prompts.len(),self.session.work.skills.join("\n"),self.session.work.context_files.join("\n")));},
+   "/context"=>{let catalog=crate::context::discover(&self.cfg.project);let rules=instructions::load(&self.cfg.project)?;let percent=self.context_percent();let estimate=self.meter.as_ref().map(|m|m.1).unwrap_or(0);self.info("Context beside 弄玉",format!("About {estimate} of {} tokens ({percent}%) · auto-compact {}\n{} provider messages · {} KB of saved content\n{} visible transcript entries · {} waiting messages\n\nAGENTS.md sources\n{}\n\n{} skills available · {} prompts available\n\nSkills used this turn\n{}\n\nAttached files this turn\n{}\n\nUse @path or @{{path with spaces}} to attach a project file.\nUse @path:10-30 for selected lines.\nFull skill text is loaded only on invocation or read_skill.\n/compact [note] saves a recoverable checkpoint. /checkpoint shows it.\nByte counts describe content, not exact model tokens; the token figure is calibrated from the provider's latest count.",self.cfg.limits.context_tokens,if !self.session.auto_compact||self.cfg.limits.auto_compact==0{"off".to_string()}else{format!("at {}%",self.cfg.limits.auto_compact)},self.session.messages.len(),serde_json::to_vec(&self.session.messages)?.len()/1000,self.session.entries.len(),self.session.pending.len(),rules.iter().map(|r|r.path.display().to_string()).collect::<Vec<_>>().join("\n"),catalog.skills.len(),catalog.prompts.len(),self.session.work.skills.join("\n"),self.session.work.context_files.join("\n")));},
    "/skills"=>{if arg.is_empty(){self.show_resources(true)}else{let v=crate::context::discover(&self.cfg.project).read_skill(arg,"SKILL.md",true)?;self.info("Skills beside 弄玉",format!("{}\n\n{}\n\n/skill {} request · invoke",v["directory"].as_str().unwrap_or(""),v["content"].as_str().unwrap_or(""),arg));}},
    "/prompts"=>self.show_resources(false),
    "/skill"|"/prompt"=>{if arg.is_empty(){bail!("Add a resource name and your request")};let invocation=format!("{cmd} {arg}");crate::context::prepare(&self.cfg.project,&invocation,&crate::context::discover(&self.cfg.project))?;self.submit(invocation)?;},
@@ -623,7 +688,7 @@ impl App {
    "/recover"=>{let command=self.session.work.command.as_ref().context("No failed command to recover")?;if command.running || (command.exit_code==Some(0)&&!command.stopped&&!command.timed_out){bail!("The latest command has not failed")};let prompt=format!("Help me recover from the latest command failure. Share a concise plan with update_plan. Inspect the actual output and relevant project files, explain the cause supported by evidence, then make a focused fix and run an appropriate check. Do not blindly repeat the same command. Respect my permission settings.\n\n{}",command.summary());self.submit(prompt)?;},
    "/review"=>{let text=if self.session.work.diffs.is_empty(){"No file edits recorded for this turn. Shell changes may require a git diff.\n\n/work shows the plan and actual checks.".into()}else{self.session.work.diffs.iter().map(|(_,d)|d.as_str()).collect::<Vec<_>>().join("\n\n")};self.info("Review changes · 弄玉",text);},
    "/new"|"/clear"=>self.new_session(arg)?,
-   "/sessions"|"/resume"=>{if !arg.is_empty(){let s=self.store.load(arg)?;if s.project!=self.cfg.project{bail!("Session belongs to a different project")};self.session=s;self.scroll=0;self.persist()?;}else{self.popup=Some(Popup::Sessions{items:self.store.list(&self.cfg.project)?,query:String::new(),index:0});}},
+   "/sessions"|"/resume"=>{if !arg.is_empty(){let s=self.store.load(arg)?;self.switch_session(s)?;}else{self.open_sessions()?;}},
    "/rename"=>{if arg.is_empty(){bail!("Use /rename followed by a title")};self.session.title=arg.chars().take(120).collect();self.session.updated=chrono::Utc::now().to_rfc3339();self.persist()?;},
    "/fork"=>{self.session=self.session.fork();if !arg.is_empty(){self.session.title=arg.into()};self.session.add("notice","Forked the conversation. This session shares the project files; no files were rolled back.");self.persist()?;self.notify("New branch saved. Project files are shared.");},
    "/model"|"/models"=>{match arg{""=>self.info("Choose an agent",format!("Current: {}\n\n/model live     MiniMax · real model\n/model demo     Offline scripted demo\n/model NAME     Use a specific MiniMax model\n\nModel changes take effect on the next message.",if self.session.demo{"offline demo"}else{&self.session.model})),"demo"=>{self.session.demo=true;self.notify("Offline demo · no API calls");},"live"=>{self.session.demo=false;self.notify(format!("MiniMax · {}",self.session.model));},name=>{if name.len()>120{bail!("Model name is too long")};self.session.model=name.into();self.session.demo=false;self.notify(format!("Model: {name}"));}}self.persist()?;},
@@ -634,7 +699,8 @@ impl App {
    "/permissions"=>{if !matches!(arg,"ask"|"allow"|"deny"){bail!("Use /permissions ask, allow, or deny")};self.cli.permissions=arg.into();self.notify(format!("Permissions: {arg} · applies to file writes and shell commands"));},
    "/check"=>self.local_check(arg)?,
 
-   "/compact"=>self.compact(arg)?,
+   "/compact"=>{match arg{"auto on"|"auto"=>{self.session.auto_compact=true;self.persist()?;self.notify(if self.cfg.limits.auto_compact==0{"Auto-compact is on for this conversation, but --auto-compact 0 disables it for this run".to_string()}else{format!("Auto-compact on · at {}% of {} tokens",self.cfg.limits.auto_compact,self.cfg.limits.context_tokens)});},"auto off"=>{self.session.auto_compact=false;self.persist()?;self.notify("Auto-compact off for this conversation · /compact still works");},_ if arg=="local"||arg.starts_with("local ")=>self.compact(arg.strip_prefix("local").unwrap_or("").trim())?,note=>self.compact_with_summary(note)?}},
+   "/limits"=>self.info("Turn limits",format!("{}\n\nSet them when starting Aster, for example:\naster --max-requests 60 --turn-seconds 1800 --context-window 200000\nEnvironment variables: ASTER_MAX_REQUESTS, ASTER_MAX_TOOLS, ASTER_TURN_SECONDS,\nASTER_MAX_OUTPUT_TOKENS, ASTER_TURN_OUTPUT_TOKENS, ASTER_CONTEXT_WINDOW, ASTER_AUTO_COMPACT.\n\nDecision waits pause the timer (up to 15 minutes each). Errors never retry automatically.\nThese bound effort, not money: every request also uses input tokens.",self.cfg.limits.describe())),
    "/checkpoint"=>self.info("Context checkpoint · 弄玉",self.session.checkpoint.as_ref().map(|c|c.report()).unwrap_or_else(||"No checkpoint yet. /compact [note] archives full context and keeps bounded recent exchanges with local historical excerpts. It makes no model request.".into())),
    "/restore"=>{if arg.is_empty(){bail!("Use /restore followed by the ID shown in /checkpoint")};self.persist()?;self.session=self.store.restore_checkpoint(arg,&self.cfg.project)?;self.scroll=0;self.stream.clear();self.notify("Full context restored as a new conversation. Project files are shared.");},
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
@@ -643,13 +709,41 @@ impl App {
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
    "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
-   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 active seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
+   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?,self.cfg.limits.describe())),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
-   "/help"=>self.info("Make yourself at home",format!("{}\n\nEnter sends / steers · Alt+Enter queues · Ctrl+G redirects\nCtrl+J inserts a line · Esc stops\nCtrl+P opens sessions · Ctrl+K opens commands\nPage Up/Down scroll · Ctrl+T shows tools\nCtrl+C saves and quits · F1 or click 弄玉 for local task controls\n\n/new [title] · /rename TITLE · /fork [title]\n/resume ID · /check FILE [expected JSON]\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
+   "/help"=>self.info("Make yourself at home",format!("{}\n\nWRITING\nEnter send · Ctrl+J, Shift+Enter or \\ Enter new line\n↑↓ move between lines, then through earlier requests\nAlt/Ctrl+←→ or Alt+B/F word · Home/End line · Ctrl+A/E line\nCtrl+W or Alt+Backspace delete word · Ctrl+U/K delete to line start/end\nEsc Esc clears the draft (↑ brings it back) · Ctrl+C clears, then quits\n\nREADING\nPgUp/PgDn page · Shift+↑↓ or wheel 3 lines · Ctrl+Home top · Ctrl+End or Esc latest\nCtrl+O shows tool details · F7 searches history\n\nWORKING\nWhile 弄玉 works: Enter steers · Alt+Enter queues · Ctrl+G redirects · Esc stops\nCtrl+P sessions (Enter open · Ctrl+N new · Ctrl+D delete)\nF1 or click 弄玉 for local task controls · F2 plan · F3 review · F4 output\nF5 checks · F6 files · F7 history · F8 tasks\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
    "/quit"|"/exit"=>self.request_quit(),
    _=>bail!("Unknown command. Type / to see available commands."),
   }
+        Ok(())
+    }
+    /// A checkpoint whose summary is written by the model, in the background.
+    fn compact_with_summary(&mut self, note: &str) -> Result<()> {
+        if self.busy_guard() {
+            return Ok(());
+        }
+        if note.len() > 2000 {
+            bail!("Checkpoint note exceeds 2 KB");
+        }
+        if self.session.messages.is_empty() {
+            bail!("No conversation context to checkpoint");
+        }
+        self.persist()?;
+        self.running = Some(agent::spawn_compaction(
+            self.session.clone(),
+            note.into(),
+            self.cfg.clone(),
+            false,
+        ));
+        self.state = "thinking".into();
+        self.session.work.activity = "Summarizing earlier context".into();
+        self.turn_started = Some(Instant::now());
+        self.notify(if self.session.demo {
+            "Compacting · offline demo summary"
+        } else {
+            "Compacting · 弄玉 is summarizing the earlier conversation (one bounded request)"
+        });
         Ok(())
     }
     fn compact(&mut self, note: &str) -> Result<()> {
@@ -726,7 +820,7 @@ impl App {
             .into(),
             Instant::now(),
         ));
-        self.notice = self.session.work.verdict().into();
+        self.notify(self.session.work.verdict());
         self.persist()
     }
     fn show_resources(&mut self, skills: bool) {
@@ -838,8 +932,9 @@ impl App {
             self.cli.permissions.clone(),
         ));
         self.stream.clear();
-        self.scroll = 0;
+        self.follow_latest();
         self.state = "thinking".into();
+        self.turn_started = Some(Instant::now());
         self.notice.clear();
         Ok(())
     }
@@ -848,7 +943,7 @@ impl App {
             r.cancel.store(true, Ordering::Relaxed);
             self.notify("Stopping… an already submitted request may still consume tokens.");
         } else {
-            self.input_set("");
+            self.notify("Nothing is running.");
         }
     }
     fn request_quit(&mut self) {
@@ -876,6 +971,29 @@ impl App {
             match event {
                 Event::DecisionClosed => {
                     self.clear_decision();
+                }
+                Event::Compacted {
+                    automatic,
+                    method,
+                    before_bytes,
+                    after_bytes,
+                    ..
+                } => {
+                    self.notify(format!(
+                        "{} · {} → {} KB · {} · /checkpoint",
+                        if automatic {
+                            "Context auto-compacted"
+                        } else {
+                            "Context compacted"
+                        },
+                        before_bytes / 1000,
+                        after_bytes / 1000,
+                        match method.as_str() {
+                            "model" => "model summary",
+                            "demo" => "demo summary",
+                            _ => "local excerpts",
+                        }
+                    ));
                 }
                 Event::InputConsumed(id) => {
                     self.session.pending.retain(|m| m.id != id);
@@ -971,15 +1089,14 @@ impl App {
                     self.session = *session;
                     self.session.pending = pending;
                     if self.session.work.has_failures() {
-                        self.notice =
-                            "A check or command failed · F4 output · /work details".into();
+                        self.notify("A check or command failed · F4 output · /work details");
                         self.reaction = Some(("concerned".into(), Instant::now()));
                     } else if self.session.work.has_stale_checks() {
-                        self.notice =
-                            "Edits changed the project after checks · F5 to review".into();
+                        self.notify("Edits changed the project after checks · F5 to review");
                         self.reaction = Some(("concerned".into(), Instant::now()));
                     }
                     self.running = None;
+                    self.turn_started = None;
                     self.stream.clear();
                     self.state = "idle".into();
                     self.clear_decision();
@@ -1034,7 +1151,9 @@ impl App {
             || matches!(&self.popup, Some(Popup::Tasks { preview: true, .. }))
         {
             "reading"
-        } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
+        } else if self.last_type.elapsed() < Duration::from_secs(2)
+            && !self.composer.text.is_empty()
+        {
             "listening"
         } else if self.session.work.has_failures() || self.session.work.has_stale_checks() {
             "concerned"
@@ -1066,7 +1185,15 @@ impl App {
             return Ok(());
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.request_quit();
+            // With a draft and nothing else open, the first Ctrl+C clears the draft.
+            if self.popup.is_none() && self.running.is_none() && !self.composer.is_empty() {
+                let draft = self.composer.text.clone();
+                self.prompts.push(&draft);
+                self.input_set("");
+                self.notify("Draft cleared · ↑ brings it back · Ctrl+C again saves and quits");
+            } else {
+                self.request_quit();
+            }
             return Ok(());
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1159,6 +1286,12 @@ impl App {
                         }
                         KeyCode::Up => index = index.saturating_sub(1),
                         KeyCode::Down => index = (index + 1).min(filtered.len().saturating_sub(1)),
+                        KeyCode::PageUp => index = index.saturating_sub(5),
+                        KeyCode::PageDown => {
+                            index = (index + 5).min(filtered.len().saturating_sub(1))
+                        }
+                        KeyCode::Home => index = 0,
+                        KeyCode::End => index = filtered.len().saturating_sub(1),
                         KeyCode::Char('u')
                             if key.modifiers.contains(KeyModifiers::CONTROL) && !preview =>
                         {
@@ -1166,7 +1299,9 @@ impl App {
                             index = 0;
                         }
                         KeyCode::Char(c)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                                 && !preview
                                 && query.len() < 160 =>
                         {
@@ -1226,12 +1361,20 @@ impl App {
                             menu.index = (menu.index + 1).min(filtered.len().saturating_sub(1))
                         }
                         KeyCode::Up => menu.index = menu.index.saturating_sub(1),
+                        KeyCode::PageDown => {
+                            menu.index = (menu.index + 5).min(filtered.len().saturating_sub(1))
+                        }
+                        KeyCode::PageUp => menu.index = menu.index.saturating_sub(5),
+                        KeyCode::Home => menu.index = 0,
+                        KeyCode::End => menu.index = filtered.len().saturating_sub(1),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             menu.query.clear();
                             menu.index = 0;
                         }
                         KeyCode::Char(c)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                                 && menu.query.len() < 160 =>
                         {
                             menu.query.push(c);
@@ -1254,16 +1397,16 @@ impl App {
                             self.popup = Some(Popup::Project(nav));
                         }
                         crate::navigator::Action::Attach(reference) => {
-                            if self.input.len() + reference.len() + 1 > 32_000 {
+                            if self.composer.text.len() + reference.len() + 1 > 32_000 {
                                 self.notify(
                                     "The draft is full. Shorten it before attaching a file.",
                                 );
                                 self.popup = Some(Popup::Project(nav));
                             } else {
-                                let text = if self.input.trim().is_empty() {
+                                let text = if self.composer.text.trim().is_empty() {
                                     format!("{reference} ")
                                 } else {
-                                    format!("{} {reference} ", self.input.trim_end())
+                                    format!("{} {reference} ", self.composer.text.trim_end())
                                 };
                                 self.input_set(text);
                                 self.last_type = Instant::now();
@@ -1293,13 +1436,23 @@ impl App {
                         KeyCode::Esc => return Ok(()),
                         KeyCode::Down => index = (index + 1).min(filtered.len().saturating_sub(1)),
                         KeyCode::Up => index = index.saturating_sub(1),
+                        KeyCode::PageDown => {
+                            index = (index + 5).min(filtered.len().saturating_sub(1))
+                        }
+                        KeyCode::PageUp => index = index.saturating_sub(5),
+                        KeyCode::Home => index = 0,
+                        KeyCode::End => index = filtered.len().saturating_sub(1),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            query.clear();
+                            index = 0;
+                        }
                         KeyCode::Enter => {
                             if let Some(resource) = filtered.get(index) {
                                 let prepared = format!(
                                     "/{} {} {}",
                                     if skills { "skill" } else { "prompt" },
                                     resource.name,
-                                    self.input
+                                    self.composer.text
                                 );
                                 if prepared.len() > 32_000 {
                                     self.notify(
@@ -1341,7 +1494,9 @@ impl App {
                             index = 0;
                         }
                         KeyCode::Char(c)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                                 && query.len() < 160 =>
                         {
                             query.push(c);
@@ -1372,8 +1527,21 @@ impl App {
                             }
                             return Ok(());
                         }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            input.clear()
+                        }
+                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            let mut editor = crate::composer::Editor::new(input);
+                            editor.key(key, usize::MAX);
+                            input = editor.text;
+                        }
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            input.push('\n')
+                        }
                         KeyCode::Char(c)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                                 && input.len() < 4000 =>
                         {
                             input.push(c)
@@ -1409,7 +1577,22 @@ impl App {
                             let _ = answer.send(options[c as usize - '1' as usize].clone());
                             return Ok(());
                         }
-                        KeyCode::Char(c) if input.len() < 2000 => input.push(c),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            input.clear()
+                        }
+                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            let mut editor = crate::composer::Editor::new(input);
+                            editor.key(key, usize::MAX);
+                            input = editor.text;
+                        }
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                                && input.len() < 2000 =>
+                        {
+                            input.push(c)
+                        }
                         KeyCode::Backspace => {
                             input.pop();
                         }
@@ -1424,11 +1607,15 @@ impl App {
                 }
                 Popup::Approval(mut a) => match key.code {
                     KeyCode::Down | KeyCode::PageDown => {
-                        a.scroll = a.scroll.saturating_add(5);
+                        a.scroll =
+                            a.scroll
+                                .saturating_add(if key.code == KeyCode::Down { 1 } else { 12 });
                         self.popup = Some(Popup::Approval(a));
                     }
                     KeyCode::Up | KeyCode::PageUp => {
-                        a.scroll = a.scroll.saturating_sub(5);
+                        a.scroll =
+                            a.scroll
+                                .saturating_sub(if key.code == KeyCode::Up { 1 } else { 12 });
                         self.popup = Some(Popup::Approval(a));
                     }
                     KeyCode::Char('y') => {
@@ -1456,8 +1643,14 @@ impl App {
                 } => {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return Ok(()),
-                        KeyCode::Down | KeyCode::PageDown => scroll = scroll.saturating_add(4),
-                        KeyCode::Up | KeyCode::PageUp => scroll = scroll.saturating_sub(4),
+                        KeyCode::Down => scroll = scroll.saturating_add(1),
+                        KeyCode::Up => scroll = scroll.saturating_sub(1),
+                        KeyCode::PageDown | KeyCode::Char(' ') => {
+                            scroll = scroll.saturating_add(12)
+                        }
+                        KeyCode::PageUp => scroll = scroll.saturating_sub(12),
+                        KeyCode::Home => scroll = 0,
+                        KeyCode::End => scroll = u16::MAX,
                         _ => {}
                     }
                     self.popup = Some(Popup::Info {
@@ -1470,32 +1663,86 @@ impl App {
                     items,
                     mut query,
                     mut index,
+                    confirm,
                 } => {
-                    let filtered = items
-                        .iter()
-                        .filter(|s| {
-                            s.title.to_lowercase().contains(&query.to_lowercase())
-                                || s.id.contains(&query)
-                        })
-                        .collect::<Vec<_>>();
+                    let filtered = filter_sessions(&items, &query);
+                    let last = filtered.len().saturating_sub(1);
+                    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+                    if let Some(id) = confirm {
+                        if key.code == KeyCode::Char('y') && id != self.session.id {
+                            self.store.delete(&id)?;
+                            self.notify("Conversation deleted. Project files were not changed.");
+                            let items = self.store.list(&self.cfg.project)?;
+                            let index =
+                                index.min(filter_sessions(&items, &query).len().saturating_sub(1));
+                            self.popup = Some(Popup::Sessions {
+                                items,
+                                query,
+                                index,
+                                confirm: None,
+                            });
+                        } else {
+                            self.popup = Some(Popup::Sessions {
+                                items,
+                                query,
+                                index,
+                                confirm: None,
+                            });
+                        }
+                        return Ok(());
+                    }
                     match key.code {
                         KeyCode::Esc => return Ok(()),
-                        KeyCode::Down => index = (index + 1).min(filtered.len().saturating_sub(1)),
-                        KeyCode::Up => index = index.saturating_sub(1),
+                        KeyCode::Down => index = if index >= last { 0 } else { index + 1 },
+                        KeyCode::Up => index = if index == 0 { last } else { index - 1 },
+                        KeyCode::PageDown => index = (index + 5).min(last),
+                        KeyCode::PageUp => index = index.saturating_sub(5),
+                        KeyCode::Home => index = 0,
+                        KeyCode::End => index = last,
                         KeyCode::Enter => {
-                            if let Some(s) = filtered.get(index) {
-                                self.session = (*s).clone();
-                                self.scroll = 0;
-                                self.stream.clear();
-                                self.persist()?;
+                            if let Some(s) = filtered.get(index)
+                                && s.id != self.session.id
+                            {
+                                let chosen = (*s).clone();
+                                self.switch_session(chosen)?;
                             }
                             return Ok(());
+                        }
+                        KeyCode::Char('n') if control => {
+                            self.new_session("")?;
+                            self.notify("New conversation · the previous one is saved");
+                            return Ok(());
+                        }
+                        KeyCode::Char('d') if control => {
+                            let target = filtered.get(index).map(|s| s.id.clone());
+                            let confirm = match target {
+                                Some(id) if id == self.session.id => {
+                                    self.notify("Use /delete for the conversation you are in.");
+                                    None
+                                }
+                                other => other,
+                            };
+                            self.popup = Some(Popup::Sessions {
+                                items,
+                                query,
+                                index,
+                                confirm,
+                            });
+                            return Ok(());
+                        }
+                        KeyCode::Char('u') if control => {
+                            query.clear();
+                            index = 0;
                         }
                         KeyCode::Backspace => {
                             query.pop();
                             index = 0
                         }
-                        KeyCode::Char(c) => {
+                        KeyCode::Char(c)
+                            if !control
+                                && !key.modifiers.contains(KeyModifiers::ALT)
+                                && query.len() < 160 =>
+                        {
                             query.push(c);
                             index = 0
                         }
@@ -1505,60 +1752,195 @@ impl App {
                         items,
                         query,
                         index,
+                        confirm: None,
                     });
                 }
             }
             return Ok(());
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::End => {
-                    self.scroll = 0;
-                    self.jump_to = None;
-                    self.notice.clear();
-                }
-                KeyCode::Char('p') => {
-                    if !self.busy_guard() {
-                        self.popup = Some(Popup::Sessions {
-                            items: self.store.list(&self.cfg.project)?,
-                            query: String::new(),
-                            index: 0,
-                        });
-                    }
-                }
-                KeyCode::Char('k') => self.input_set("/"),
-                KeyCode::Char('t') => self.show_tools = !self.show_tools,
-                KeyCode::Char('j') => {
-                    self.input.insert(self.cursor, '\n');
-                    self.cursor += 1;
-                }
-                KeyCode::Char('a') => self.cursor = 0,
-                KeyCode::Char('e') => self.cursor = self.input.len(),
-                KeyCode::Char('u') => self.input_set(""),
-                _ => {}
+        self.composer_key(key)
+    }
+    fn scroll_by(&mut self, lines: isize) {
+        let next = (self.scroll as isize).saturating_add(lines).max(0) as usize;
+        self.scroll = next.min(self.scroll_max);
+        if self.scroll == 0 {
+            self.jump_to = None;
+        }
+    }
+    fn follow_latest(&mut self) {
+        self.scroll = 0;
+        self.jump_to = None;
+    }
+    fn open_sessions(&mut self) -> Result<()> {
+        let items = self.store.list(&self.cfg.project)?;
+        // The conversation you are in is rarely the one you want to open.
+        let index = items
+            .iter()
+            .position(|s| s.id != self.session.id)
+            .unwrap_or(0);
+        self.popup = Some(Popup::Sessions {
+            items,
+            query: String::new(),
+            index,
+            confirm: None,
+        });
+        Ok(())
+    }
+    fn switch_session(&mut self, mut session: Session) -> Result<()> {
+        if session.project != self.cfg.project {
+            bail!("Session belongs to a different project")
+        }
+        self.persist()?;
+        if matches!(session.status.as_str(), "thinking" | "working" | "speaking") {
+            session.status = "interrupted".into();
+            session.add(
+                "notice",
+                "Previous work was interrupted. Inspect files before continuing.",
+            );
+        }
+        self.session = session;
+        self.follow_latest();
+        self.stream.clear();
+        self.state = "idle".into();
+        self.meter = None;
+        self.persist()?;
+        self.notify(format!(
+            "Resumed · {}",
+            tools::clip(&clean(&self.session.title), 60)
+        ));
+        Ok(())
+    }
+    fn escape(&mut self) {
+        let palette = !self.suggestions().is_empty();
+        if palette {
+            // Esc cancels the command palette it opened, and never a longer draft.
+            if !self.composer.text.trim().contains(char::is_whitespace)
+                && self.composer.text.trim().len() <= 16
+            {
+                self.input_set("");
+            } else {
+                self.suggestions_hidden = true;
             }
-            return Ok(());
+            return;
+        }
+        if self.running.is_some() {
+            self.stop();
+            return;
+        }
+        if self.scroll > 0 {
+            self.follow_latest();
+            self.notice.clear();
+            return;
+        }
+        if self.composer.is_empty() {
+            return;
+        }
+        if self
+            .esc_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(1500))
+        {
+            let draft = self.composer.text.clone();
+            self.prompts.push(&draft);
+            self.input_set("");
+            self.esc_at = None;
+            self.notify("Draft cleared · ↑ brings it back");
+        } else {
+            self.esc_at = Some(Instant::now());
+            self.notify("Esc again clears the draft");
+        }
+    }
+    fn composer_key(&mut self, key: KeyEvent) -> Result<()> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if key.code != KeyCode::Esc {
+            self.esc_at = None;
         }
         match key.code {
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                let input = self.input.trim().to_string();
-                self.enqueue(input, Delivery::FollowUp)?;
-                self.input_set("");
+            KeyCode::PageUp => {
+                self.scroll_by(self.page as isize);
+                return Ok(());
             }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.input.insert(self.cursor, '\n');
-                self.cursor += 1;
+            KeyCode::PageDown => {
+                self.scroll_by(-(self.page as isize));
+                return Ok(());
             }
-            KeyCode::Enter => {
-                let suggestions = self.suggestions();
-                if !suggestions.is_empty()
-                    && self.input != suggestions[self.selection.min(suggestions.len() - 1)].0
-                {
-                    let cmd = suggestions[self.selection.min(suggestions.len() - 1)].0;
-                    self.input_set(cmd);
+            KeyCode::Home if control => {
+                self.scroll = self.scroll_max;
+                return Ok(());
+            }
+            KeyCode::End if control => {
+                self.follow_latest();
+                self.notice.clear();
+                return Ok(());
+            }
+            KeyCode::Up if shift && !alt => {
+                self.scroll_by(3);
+                return Ok(());
+            }
+            KeyCode::Down if shift && !alt => {
+                self.scroll_by(-3);
+                return Ok(());
+            }
+            _ => {}
+        }
+        if control {
+            match key.code {
+                KeyCode::Char('p') => {
+                    if !self.busy_guard() {
+                        self.open_sessions()?;
+                    }
                     return Ok(());
                 }
-                let input = self.input.trim().to_string();
+                KeyCode::Char('t') | KeyCode::Char('o') => {
+                    self.show_tools = !self.show_tools;
+                    self.notify(if self.show_tools {
+                        "Tool details expanded · Ctrl+O collapses"
+                    } else {
+                        "Tool details collapsed"
+                    });
+                    return Ok(());
+                }
+                KeyCode::Char('j') => {
+                    self.composer.insert("\n");
+                    self.last_type = Instant::now();
+                    return Ok(());
+                }
+                KeyCode::Char('l') => {
+                    self.last_image = None;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        let suggestions = self.suggestions();
+        let chosen = self.selection.min(suggestions.len().saturating_sub(1));
+        match key.code {
+            KeyCode::Enter if alt => {
+                let input = self.composer.text.trim().to_string();
+                self.enqueue(input.clone(), Delivery::FollowUp)?;
+                self.prompts.push(&input);
+                self.input_set("");
+            }
+            KeyCode::Enter if shift => {
+                self.composer.insert("\n");
+            }
+            KeyCode::Enter => {
+                if !suggestions.is_empty() && self.composer.text.trim() != suggestions[chosen].0 {
+                    self.input_set(suggestions[chosen].0);
+                    return Ok(());
+                }
+                // A trailing backslash continues the message on a new line.
+                if self.composer.text[..self.composer.cursor].ends_with('\\') {
+                    let at = self.composer.cursor - 1;
+                    self.composer.text.replace_range(at..at + 1, "\n");
+                    return Ok(());
+                }
+                let input = self.composer.text.trim().to_string();
+                if input.is_empty() {
+                    return Ok(());
+                }
+                self.prompts.push(&input);
                 if self.running.is_some() && !input.starts_with('/') {
                     self.enqueue(input, Delivery::Steer)?;
                     self.input_set("");
@@ -1572,71 +1954,70 @@ impl App {
                 }
             }
             KeyCode::Tab => {
-                let options = self.suggestions();
-                if let Some((cmd, _)) =
-                    options.get(self.selection.min(options.len().saturating_sub(1)))
-                {
+                if let Some((cmd, _)) = suggestions.get(chosen) {
                     self.input_set(format!("{cmd} "));
                 }
             }
-            KeyCode::Esc => self.stop(),
-            KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    let at = self.input[..self.cursor]
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.input.replace_range(at..self.cursor, "");
-                    self.cursor = at;
-                }
+            KeyCode::Esc => self.escape(),
+            KeyCode::Up if !suggestions.is_empty() => {
+                self.selection = chosen.checked_sub(1).unwrap_or(suggestions.len() - 1)
             }
-            KeyCode::Delete => {
-                if self.cursor < self.input.len() {
-                    let len = self.input[self.cursor..].chars().next().unwrap().len_utf8();
-                    self.input.replace_range(self.cursor..self.cursor + len, "");
-                }
-            }
-            KeyCode::Left => {
-                self.cursor = self.input[..self.cursor]
-                    .char_indices()
-                    .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-            }
-            KeyCode::Right => {
-                if let Some(c) = self.input[self.cursor..].chars().next() {
-                    self.cursor += c.len_utf8()
-                }
-            }
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.input.len(),
-            KeyCode::Up => {
-                if !self.suggestions().is_empty() {
-                    self.selection = self.selection.saturating_sub(1);
+            KeyCode::Down if !suggestions.is_empty() => {
+                self.selection = if chosen + 1 >= suggestions.len() {
+                    0
                 } else {
-                    self.scroll += 3;
+                    chosen + 1
                 }
             }
-            KeyCode::Down => {
-                let n = self.suggestions().len();
-                if n > 0 {
-                    self.selection = (self.selection + 1).min(n - 1);
-                } else {
-                    self.scroll = self.scroll.saturating_sub(3);
+            _ => {
+                let before = self.composer.clone();
+                match self.composer.key(key, self.composer_width) {
+                    Edit::AboveTop => {
+                        if let Some(text) = self.prompts.older(&self.composer.text) {
+                            self.composer.set(text);
+                            self.suggestions_hidden = true;
+                        }
+                    }
+                    Edit::BelowBottom => {
+                        if let Some(text) = self.prompts.newer() {
+                            self.composer.set(text);
+                            self.suggestions_hidden = true;
+                        }
+                    }
+                    Edit::Handled if self.composer.text != before.text => {
+                        if self.composer.text.len() > 32_000 {
+                            self.composer = before;
+                            self.notify("The draft is limited to 32 KB.");
+                        } else {
+                            self.prompts.reset();
+                            self.last_type = Instant::now();
+                            self.selection = 0;
+                            self.suggestions_hidden = false;
+                        }
+                    }
+                    Edit::Handled | Edit::Ignored => {}
                 }
             }
-            KeyCode::PageUp => self.scroll += 12,
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(12),
-            KeyCode::Char(c) if !c.is_control() && self.input.len() < 32_000 => {
-                self.input.insert(self.cursor, c);
-                self.cursor += c.len_utf8();
-                self.last_type = Instant::now();
-                self.selection = 0;
-            }
-            _ => {}
         }
         Ok(())
+    }
+    fn context_percent(&mut self) -> u64 {
+        let key = (
+            self.session.id.clone(),
+            self.session.messages.len(),
+            self.session.updated.clone(),
+        );
+        let tokens = match &self.meter {
+            Some((cached, tokens)) if *cached == key => *tokens,
+            _ => {
+                let tokens = self
+                    .session
+                    .context_estimate(16_000 + agent::TOOL_SCHEMA_BYTES);
+                self.meter = Some((key, tokens));
+                tokens
+            }
+        };
+        tokens * 100 / self.cfg.limits.context_tokens.max(1)
     }
     pub fn draw(&mut self, f: &mut Frame) {
         let all = f.area();
@@ -1651,60 +2032,32 @@ impl App {
             return;
         }
         let area = all.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
+            horizontal: if all.width >= 80 { 2 } else { 1 },
+            vertical: if all.height >= 30 { 1 } else { 0 },
         });
-        let project = self
-            .cfg
-            .project
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let header = Line::from(vec![
-            Span::styled("✦ aster", style(JADE).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("   /   {}", clean(&project)), style(DIM)),
-            Span::styled(
-                format!(
-                    "   {}",
-                    if self.session.mode == "plan" {
-                        "PLAN"
-                    } else {
-                        ""
-                    }
-                ),
-                style(GOLD),
-            ),
-        ]);
+        self.draw_header(f, Rect::new(area.x, area.y, area.width, 1));
         f.render_widget(
-            Paragraph::new(header),
-            Rect::new(area.x, area.y, area.width, 1),
+            Paragraph::new("─".repeat(area.width as usize)).style(style(LINE)),
+            Rect::new(area.x, area.y + 1, area.width, 1),
         );
-        let model = if self.session.demo {
-            "offline demo"
-        } else {
-            &self.session.model
-        };
-        let label = format!("{}  ·  {}", model, &self.session.id[..6]);
-        let len = label.width() as u16;
-        if area.width > 88 {
-            f.render_widget(
-                Paragraph::new(label).style(style(DIM)),
-                Rect::new(area.right().saturating_sub(len), area.y, len, 1),
-            );
-        }
-        let input_lines = wrap(&self.input, area.width.saturating_sub(4) as usize);
-        let composer_h = (input_lines.len() as u16).clamp(1, 5) + 3;
+        let columns = area.width.saturating_sub(6).max(1) as usize;
+        self.composer_width = columns;
+        let rows = self.composer.rows(columns);
+        let visible_rows = rows.len().clamp(1, 6) as u16;
+        let composer_h = visible_rows + 2;
+        let footer_y = area.bottom().saturating_sub(1);
+        let composer_y = footer_y.saturating_sub(composer_h);
         let body = Rect::new(
             area.x,
-            area.y + 3,
+            area.y + 2,
             area.width,
-            area.height.saturating_sub(composer_h + 5),
+            composer_y.saturating_sub(area.y + 2),
         );
         let pet_width = if self.companion.is_some() || self.portrait.frame.is_some() {
-            if area.width >= 96 {
+            if area.width >= 110 {
                 area.width * 34 / 100
             } else if area.width >= 72 {
-                23
+                (area.width * 30 / 100).max(24)
             } else {
                 0
             }
@@ -1715,120 +2068,60 @@ impl App {
             body.x,
             body.y,
             body.width
-                .saturating_sub(pet_width + if pet_width > 0 { 4 } else { 0 }),
+                .saturating_sub(pet_width + if pet_width > 0 { 3 } else { 0 }),
             body.height,
         );
-        if self.session.entries.is_empty() && self.stream.is_empty() {
+        if self.session.entries.is_empty() && self.stream.is_empty() && self.running.is_none() {
             self.welcome(f, chat)
         } else {
             self.conversation(f, chat)
         }
         if pet_width > 0 {
+            let divider = chat.right() + 1;
+            for y in body.y..body.bottom() {
+                f.render_widget(
+                    Paragraph::new("│").style(style(LINE)),
+                    Rect::new(divider, y, 1, 1),
+                );
+            }
             let pet = Rect::new(body.right() - pet_width, body.y, pet_width, body.height);
             self.draw_pet(f, pet);
         }
-        let composer_y = area.bottom().saturating_sub(composer_h + 1);
-        let title = tools::clip(&clean(&self.session.title), 60);
-        let footer_title = format!(
-            "{}  ·  {}",
-            title,
-            if self.running.is_some() {
-                &self.state
-            } else {
-                "ready"
-            }
-        );
-        f.render_widget(
-            Paragraph::new(footer_title).style(style(DIM)),
-            Rect::new(area.x, composer_y.saturating_sub(1), area.width, 1),
-        );
-        f.render_widget(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(style(LINE)),
-            Rect::new(area.x, composer_y, area.width, composer_h),
-        );
-        let input_area = Rect::new(
-            area.x + 3,
-            composer_y + 1,
-            area.width.saturating_sub(4),
-            composer_h - 2,
-        );
-        f.render_widget(
-            Paragraph::new("›").style(style(JADE)),
-            Rect::new(area.x, composer_y + 1, 2, 1),
-        );
-        let prefix = wrap(&self.input[..self.cursor], input_area.width as usize);
-        let input_start = prefix.len().saturating_sub(input_area.height as usize);
-        if self.input.is_empty() {
-            f.render_widget(
-                Paragraph::new(if self.running.is_some() {
-                    "Add a direction · Enter steer · Alt+Enter next task"
-                } else {
-                    "和弄玉说说，你想做什么？"
-                })
-                .style(style(DIM)),
-                input_area,
-            );
-        } else {
-            f.render_widget(
-                Paragraph::new(
-                    input_lines[input_start..]
-                        .iter()
-                        .take(input_area.height as usize)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-                .style(style(FG)),
-                input_area,
-            );
-        }
-        let bottom = if self.notice.is_empty() && !self.session.pending.is_empty() {
-            format!(
-                "{} messages waiting · /queue inspect · Esc stops and keeps the queue",
-                self.session.pending.len()
-            )
-        } else if self.notice.is_empty() {
-            "↵ send   / commands   F1 together   F6 files   Ctrl+P sessions   Esc stop".into()
-        } else {
-            clean(&self.notice)
-        };
-        f.render_widget(
-            Paragraph::new(bottom).style(style(DIM)),
-            Rect::new(area.x, area.bottom() - 1, area.width, 1),
-        );
-        if self.popup.is_none() {
-            let y = (prefix.len() - 1 - input_start) as u16;
-            let x = prefix
-                .last()
-                .map(|s| s.width())
-                .unwrap_or(0)
-                .min(input_area.width.saturating_sub(1) as usize) as u16;
-            f.set_cursor_position((input_area.x + x, input_area.y + y));
-        }
+        let composer = Rect::new(area.x, composer_y, area.width, composer_h);
+        self.draw_composer(f, composer, columns, &rows, visible_rows as usize);
+        self.draw_footer(f, Rect::new(area.x, footer_y, area.width, 1));
         let options = self.suggestions();
         if !options.is_empty() && self.popup.is_none() {
             let count = options.len().min(8) as u16;
-            let w = area.width.min(74);
+            let w = area.width.min(76);
             let r = Rect::new(area.x, composer_y.saturating_sub(count + 2), w, count + 2);
             f.render_widget(Clear, r);
             f.render_widget(
-                Block::default()
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(style(LINE))
                     .style(style(FG))
-                    .borders(Borders::LEFT)
-                    .border_style(style(JADE)),
+                    .title_bottom(Line::styled(
+                        " ↑↓ choose · Tab complete · Esc close ",
+                        style(DIM),
+                    )),
                 r,
             );
             if !r.intersection(self.image_area).is_empty() {
                 self.image_area = Rect::default();
             }
-            let start = self.selection.saturating_sub(7);
+            let chosen = self.selection.min(options.len() - 1);
+            let start = chosen.saturating_sub(7);
             for (i, (name, help)) in options.iter().skip(start).take(8).enumerate() {
-                let chosen = i + start == self.selection;
-                let text = format!(" {} {:14} {}", if chosen { "›" } else { " " }, name, help);
+                let selected = i + start == chosen;
                 f.render_widget(
-                    Paragraph::new(text).style(style(if chosen { JADE } else { DIM })),
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(
+                            format!(" {} {:14}", if selected { "›" } else { " " }, name),
+                            style(if selected { JADE } else { FG }),
+                        ),
+                        Span::styled(format!(" {help}"), style(DIM)),
+                    ])),
                     Rect::new(r.x + 1, r.y + i as u16 + 1, r.width - 2, 1),
                 );
             }
@@ -1847,10 +2140,11 @@ impl App {
                     | Popup::Resources { .. }
             ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output") || title.starts_with("Checks beside") || title.starts_with("Context checkpoint"));
             let side_by_side = decision && pet_width > 0 && chat.width >= 42;
-            if side_by_side {
-                f.render_widget(Clear, chat);
-                f.render_widget(Block::default().style(style(FG)), chat);
-            }
+            // Nothing half-hidden behind a panel: wide characters would tear its border.
+            let modal = Rect::new(area.x, body.y, area.width, footer_y.saturating_sub(body.y));
+            let behind = if side_by_side { chat } else { modal };
+            f.render_widget(Clear, behind);
+            f.render_widget(Block::default().style(style(FG)), behind);
             if !side_by_side {
                 self.image_area = Rect::default();
             }
@@ -1858,42 +2152,268 @@ impl App {
                 f,
                 popup,
                 self.inspection_return.is_some(),
+                &self.session.id,
                 if side_by_side {
-                    Rect::new(
-                        chat.x,
-                        area.y + 2,
-                        chat.width,
-                        area.height.saturating_sub(7),
-                    )
+                    Rect::new(chat.x, body.y, chat.width, body.height + composer_h)
                 } else {
-                    area
+                    modal
                 },
             );
         }
     }
+    fn draw_header(&self, f: &mut Frame, r: Rect) {
+        let project = self
+            .cfg
+            .project
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let model = if self.session.demo {
+            "offline demo".to_string()
+        } else {
+            clean(&self.session.model)
+        };
+        let right = format!("{model} · {}", &self.session.id[..6]);
+        let room = (r.width as usize).saturating_sub(right.width() + 4);
+        let mut spans = vec![
+            Span::styled("✦ aster", style(JADE).add_modifier(Modifier::BOLD)),
+            Span::styled("  ", style(FG)),
+            Span::styled(tools::clip(&clean(&project), 40), style(FG)),
+        ];
+        if self.session.mode == "plan" {
+            spans.push(Span::styled(
+                "  PLAN",
+                style(GOLD).add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled("  ·  ", style(LINE)));
+        spans.push(Span::styled(
+            clean(&self.session.title).replace('\n', " "),
+            style(DIM),
+        ));
+        let left = Line::from(spans);
+        let left_width = left.width().min(room.max(20));
+        f.render_widget(
+            Paragraph::new(left),
+            Rect::new(r.x, r.y, left_width as u16, 1),
+        );
+        if r.width as usize > left_width + right.width() + 4 {
+            let len = right.width() as u16;
+            f.render_widget(
+                Paragraph::new(right).style(style(DIM)),
+                Rect::new(r.right().saturating_sub(len), r.y, len, 1),
+            );
+        }
+    }
+    fn draw_composer(
+        &mut self,
+        f: &mut Frame,
+        r: Rect,
+        columns: usize,
+        rows: &[(usize, usize)],
+        visible: usize,
+    ) {
+        let running = self.running.is_some();
+        let (mode, mode_color) = if self.session.mode == "plan" {
+            ("plan", GOLD)
+        } else {
+            ("build", JADE)
+        };
+        let status = if let Some(started) = self.turn_started.filter(|_| running) {
+            let ticks = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+            let i = (started.elapsed().as_millis() / 120) as usize % ticks.len();
+            Span::styled(
+                format!(
+                    " {} {} · {}s ",
+                    ticks[i],
+                    self.state,
+                    started.elapsed().as_secs()
+                ),
+                style(JADE),
+            )
+        } else if !self.session.pending.is_empty() {
+            Span::styled(
+                format!(" {} waiting · /queue ", self.session.pending.len()),
+                style(GOLD),
+            )
+        } else {
+            Span::styled(" ● ready ", style(DIM))
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(style(if self.popup.is_none() { LINE } else { BG }))
+            .style(style(FG))
+            .title(Line::from(vec![
+                Span::styled(format!(" {mode} "), style(mode_color)),
+                Span::styled(format!("· {} ", self.cli.permissions), style(DIM)),
+            ]))
+            .title(Line::from(status).right_aligned());
+        f.render_widget(block, r);
+        let inner = Rect::new(
+            r.x + 2,
+            r.y + 1,
+            r.width.saturating_sub(4),
+            r.height.saturating_sub(2),
+        );
+        f.render_widget(
+            Paragraph::new("›").style(style(JADE)),
+            Rect::new(inner.x, inner.y, 1, 1),
+        );
+        let text_area = Rect::new(inner.x + 2, inner.y, columns as u16, inner.height);
+        if self.composer.is_empty() {
+            f.render_widget(
+                Paragraph::new(if running {
+                    "Add a direction · Enter steers · Alt+Enter queues the next task"
+                } else {
+                    "和弄玉说说，你想做什么？"
+                })
+                .style(style(DIM)),
+                text_area,
+            );
+            if self.popup.is_none() {
+                f.set_cursor_position((text_area.x, text_area.y));
+            }
+            return;
+        }
+        let (row, column) = self.composer.cursor_position(columns);
+        let start = (row + 1).saturating_sub(visible);
+        let lines = rows
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|&(a, b)| Line::styled(clean(&self.composer.text[a..b]), style(FG)))
+            .collect::<Vec<_>>();
+        f.render_widget(Paragraph::new(lines), text_area);
+        if self.popup.is_none() {
+            f.set_cursor_position((
+                text_area.x + (column as u16).min(text_area.width.saturating_sub(1)),
+                text_area.y + (row - start) as u16,
+            ));
+        }
+        if start > 0 {
+            f.render_widget(
+                Paragraph::new("↑").style(style(DIM)),
+                Rect::new(inner.x, inner.y + 1, 1, 1),
+            );
+        }
+    }
+    fn draw_footer(&mut self, f: &mut Frame, r: Rect) {
+        let percent = self.context_percent();
+        let meter = format!(
+            "ctx {percent}%{} · {} in · {} out",
+            if self.session.auto_compact && self.cfg.limits.auto_compact > 0 {
+                ""
+            } else {
+                " (auto-compact off)"
+            },
+            compact_count(self.session.input_tokens),
+            compact_count(self.session.output_tokens)
+        );
+        let meter_color = if percent >= u64::from(self.cfg.limits.auto_compact.max(1)) {
+            RED
+        } else if percent >= 60 {
+            GOLD
+        } else {
+            DIM
+        };
+        let fresh = !self.notice.is_empty() && self.notice_at.elapsed() < Duration::from_secs(12);
+        let (hint, color) = if fresh {
+            (clean(&self.notice), GOLD)
+        } else if self.popup.is_some() {
+            (String::new(), DIM)
+        } else if self.scroll > 0 {
+            (
+                format!(
+                    "↑ reading {} lines above the latest · PgDn · Ctrl+End or Esc returns",
+                    self.scroll
+                ),
+                GOLD,
+            )
+        } else if !self.session.pending.is_empty() {
+            (
+                format!(
+                    "{} messages waiting · /queue inspect · Esc stops and keeps the queue",
+                    self.session.pending.len()
+                ),
+                DIM,
+            )
+        } else if self.running.is_some() {
+            (
+                "Enter steer · Alt+Enter queue · Ctrl+G redirect · F4 output · Esc stop".into(),
+                DIM,
+            )
+        } else if !self.composer.is_empty() {
+            (
+                "Enter send · Ctrl+J newline · ↑↓ lines & history · Esc Esc clear".into(),
+                DIM,
+            )
+        } else {
+            (
+                "Enter send · / commands · ↑ history · PgUp scroll · F1 together · Ctrl+P sessions"
+                    .into(),
+                DIM,
+            )
+        };
+        let meter_width = meter.width() as u16;
+        let show_meter = r.width > meter_width + 20;
+        let hint_width = if show_meter {
+            r.width - meter_width - 2
+        } else {
+            r.width
+        };
+        f.render_widget(
+            Paragraph::new(fit_hint(&hint, hint_width.saturating_sub(2) as usize))
+                .style(style(color)),
+            Rect::new(r.x + 1, r.y, hint_width.saturating_sub(1), 1),
+        );
+        if show_meter {
+            f.render_widget(
+                Paragraph::new(meter).style(style(meter_color)),
+                Rect::new(r.right() - meter_width, r.y, meter_width, 1),
+            );
+        }
+    }
     fn welcome(&self, f: &mut Frame, r: Rect) {
-        let y = r.y + r.height.saturating_sub(15) / 2;
-        let w = r.width;
         let texts = [
-            ("NONGYU / 弄玉", JADE),
+            ("✦", JADE),
+            ("弄玉 · NONGYU", JADE),
             ("", FG),
-            ("A little company.", FG),
-            ("A place to make things.", FG),
+            ("A little company. A place to make things.", FG),
             ("", FG),
             ("Aster，今天想一起做什么？", FG),
-            ("", FG),
-            ("Tell me what you have in mind.", DIM),
-            ("I’ll stay with the work, from idea to check.", DIM),
+            (
+                "Tell me what you have in mind; I'll stay with the work, from idea to check.",
+                DIM,
+            ),
             ("", FG),
             ("/sessions   pick up where you left off", DIM),
             ("/agents     the rules of this project", DIM),
             ("/demo       try a real file + check", DIM),
+            ("↑           recall an earlier request", DIM),
         ];
+        let y = r.y + r.height.saturating_sub(texts.len() as u16) / 2;
+        let list_width = texts[8..].iter().map(|(t, _)| t.width()).max().unwrap_or(0) as u16;
+        let list_x = r.x + r.width.saturating_sub(list_width) / 2;
         for (i, (t, c)) in texts.into_iter().enumerate() {
-            if y + (i as u16) < r.bottom() {
+            let row = y + i as u16;
+            if row >= r.bottom() {
+                break;
+            }
+            let paragraph = Paragraph::new(t).style(style(c).add_modifier(if i == 1 {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }));
+            if i >= 8 {
                 f.render_widget(
-                    Paragraph::new(t).style(style(c)),
-                    Rect::new(r.x + 1, y + i as u16, w.saturating_sub(2), 1),
+                    paragraph,
+                    Rect::new(list_x, row, r.right().saturating_sub(list_x), 1),
+                );
+            } else {
+                f.render_widget(
+                    paragraph.alignment(ratatui::layout::Alignment::Center),
+                    Rect::new(r.x, row, r.width, 1),
                 );
             }
         }
@@ -1907,23 +2427,41 @@ impl App {
             .is_some_and(|(id, _, w, _, _)| id == &self.session.id && *w == width);
         self.transcript
             .update(&self.session, width, self.show_tools);
-        let mut tail = if self.stream.is_empty() {
-            vec![]
-        } else {
-            entry_lines(
+        let mut tail =
+            if self.transcript.after_tool && (!self.stream.is_empty() || self.running.is_some()) {
+                vec![line("", FG)]
+            } else {
+                vec![]
+            };
+        if !self.stream.is_empty() {
+            tail.extend(entry_lines(
                 &Entry {
                     role: "nongyu".into(),
                     text: self.stream.clone(),
                 },
                 width,
                 self.show_tools,
-            )
-        };
+            ));
+        }
         if self.running.is_some() && self.stream.is_empty() {
             let ticks = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
             let i =
                 (chrono::Utc::now().timestamp_millis() / 120).unsigned_abs() as usize % ticks.len();
-            tail.push(line(format!("{} 弄玉 · {}", ticks[i], self.state), JADE));
+            let activity = if self.session.work.activity.is_empty() {
+                self.state.clone()
+            } else {
+                self.session.work.activity.to_lowercase()
+            };
+            tail.push(Line::from(vec![
+                Span::styled(format!("{} 弄玉 · {activity}", ticks[i]), style(JADE)),
+                Span::styled(
+                    format!(
+                        " · {}s · Esc stops",
+                        self.turn_started.map_or(0, |t| t.elapsed().as_secs())
+                    ),
+                    style(DIM),
+                ),
+            ]));
         }
         let total = self.transcript.lines.len() + tail.len();
         if self.scroll > 0 && same_layout {
@@ -1937,12 +2475,15 @@ impl App {
         }
         self.transcript.rendered_total = total;
         let max = total.saturating_sub(r.height as usize);
+        self.scroll_max = max;
+        self.page = (r.height as usize).saturating_sub(2).max(1);
         if let Some(entry) = self.jump_to.take()
             && let Some(start) = self.transcript.starts.get(entry)
         {
             self.scroll = max.saturating_sub(*start);
         }
-        let start = max.saturating_sub(self.scroll);
+        self.scroll = self.scroll.min(max);
+        let start = max - self.scroll;
         f.render_widget(
             Paragraph::new(
                 self.transcript
@@ -1954,15 +2495,18 @@ impl App {
                     .cloned()
                     .collect::<Vec<_>>(),
             ),
-            r,
+            Rect::new(r.x + 1, r.y, r.width.saturating_sub(1), r.height),
         );
+        if self.scroll > 0 && r.height > 2 {
+            let label = format!(" ↓ {} newer lines · PgDn · Ctrl+End ", self.scroll);
+            let w = (label.width() as u16).min(r.width);
+            f.render_widget(
+                Paragraph::new(label).style(Style::default().fg(BG).bg(GOLD)),
+                Rect::new(r.right().saturating_sub(w), r.bottom() - 1, w, 1),
+            );
+        }
     }
     fn draw_pet(&mut self, f: &mut Frame, r: Rect) {
-        let compact = r.height < 20;
-        f.render_widget(
-            Paragraph::new("弄玉").style(style(FG).add_modifier(Modifier::BOLD)),
-            Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), 1),
-        );
         let state = if self.inspection_return.is_some() {
             "reviewing before your decision"
         } else if self.running.is_some() && !self.session.work.waiting.is_empty() {
@@ -1977,7 +2521,7 @@ impl App {
             "looking back together"
         } else if matches!(self.popup, Some(Popup::Tasks { .. })) {
             "choosing the next check"
-        } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
+        } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.composer.is_empty() {
             "listening"
         } else if self.session.work.has_failures() {
             "a check needs attention"
@@ -1987,32 +2531,27 @@ impl App {
             "here with you"
         };
         f.render_widget(
-            Paragraph::new(format!("◌ {state}")).style(style(JADE)),
-            Rect::new(
-                r.x + 1,
-                r.y + if compact { 1 } else { 2 },
-                r.width.saturating_sub(2),
-                1,
-            ),
+            Paragraph::new(Line::from(vec![
+                Span::styled("弄玉", style(FG).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  ◌ {state}"), style(JADE)),
+            ])),
+            Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), 1),
         );
-        let card_height = if r.height >= 24 {
+        let card_height = if r.height >= 26 {
             8
         } else if r.height >= 16 {
             4
         } else {
             1
         };
-        let height = r
-            .height
-            .saturating_sub(if compact { 3 } else { 5 } + card_height);
-        let width = r.width.min((f64::from(height) * 1.36) as u16);
-        let height = height.min((f64::from(width) / 1.36) as u16);
-        let area = Rect::new(
-            r.x + (r.width - width) / 2,
-            r.y + if compact { 2 } else { 4 },
-            width,
-            height,
+        let portrait = Rect::new(
+            r.x + 1,
+            r.y + 2,
+            r.width.saturating_sub(2),
+            r.height.saturating_sub(3 + card_height + 1),
         );
+        let area = fit(portrait, self.portrait_aspect(), self.cell_px);
+        self.request_view(portrait);
         self.image_area = area;
         if let Some(frame) = &self.portrait.frame {
             if self.graphics == Graphics::Halfblocks {
@@ -2023,13 +2562,18 @@ impl App {
                 Paragraph::new(if self.companion.is_some() {
                     clean(&self.portrait.status)
                 } else {
-                    "Live2D is hidden".into()
+                    "Live2D is hidden · /pet on".into()
                 })
                 .wrap(Wrap { trim: true })
                 .style(style(DIM)),
-                area,
+                portrait,
             );
         }
+        let divider_y = r.bottom().saturating_sub(card_height + 1);
+        f.render_widget(
+            Paragraph::new("─".repeat(r.width.saturating_sub(2) as usize)).style(style(LINE)),
+            Rect::new(r.x + 1, divider_y, r.width.saturating_sub(2), 1),
+        );
         self.work_area = Rect::new(
             r.x,
             r.bottom().saturating_sub(card_height),
@@ -2045,7 +2589,7 @@ impl App {
                 } else {
                     "YOUR DECISION"
                 },
-                JADE,
+                if work.waiting.is_empty() { JADE } else { GOLD },
             ));
             let focus = if !work.waiting.is_empty() {
                 work.waiting.clone()
@@ -2081,23 +2625,30 @@ impl App {
                 lines.push(line("", DIM));
             }
             if !work.steps.is_empty() {
-                lines.push(line(
-                    format!(
-                        "{}/{} steps · {} {}",
-                        work.steps
-                            .iter()
-                            .filter(|s| s.status == crate::work::StepStatus::Done)
-                            .count(),
-                        work.steps.len(),
-                        work.changed.len(),
-                        if work.changed.len() == 1 {
-                            "file"
-                        } else {
-                            "files"
-                        }
+                let done = work
+                    .steps
+                    .iter()
+                    .filter(|s| s.status == crate::work::StepStatus::Done)
+                    .count();
+                let bar_width = 10usize;
+                let filled = done * bar_width / work.steps.len().max(1);
+                lines.push(Line::from(vec![
+                    Span::styled("━".repeat(filled), style(JADE)),
+                    Span::styled("━".repeat(bar_width - filled), style(LINE)),
+                    Span::styled(
+                        format!(
+                            " {done}/{} steps · {} {}",
+                            work.steps.len(),
+                            work.changed.len(),
+                            if work.changed.len() == 1 {
+                                "file"
+                            } else {
+                                "files"
+                            }
+                        ),
+                        style(DIM),
                     ),
-                    DIM,
-                ));
+                ]));
             }
         }
         if card_height >= 4 {
@@ -2105,6 +2656,8 @@ impl App {
                 work.verdict(),
                 if work.has_failures() || work.has_stale_checks() {
                     GOLD
+                } else if work.verified() {
+                    JADE
                 } else {
                     DIM
                 },
@@ -2117,7 +2670,11 @@ impl App {
                 };
                 let last = tail.lines().last().unwrap_or("Waiting for output");
                 lines.push(line(
-                    format!("{:.1}s · {}", command.elapsed_ms as f64 / 1000., last),
+                    format!(
+                        "{:.1}s · {}",
+                        command.elapsed_ms as f64 / 1000.,
+                        clean(last)
+                    ),
                     DIM,
                 ));
             } else {
@@ -2125,12 +2682,15 @@ impl App {
             }
         }
         lines.push(line(
-            if work.command.is_some() {
-                "F1 together · F4 output"
-            } else {
-                "F1 together · F3 review"
-            },
-            JADE,
+            fit_hint(
+                if work.command.is_some() {
+                    "F1 together · F4 output"
+                } else {
+                    "F1 together · F3 review"
+                },
+                r.width.saturating_sub(2) as usize,
+            ),
+            DIM,
         ));
         f.render_widget(
             Paragraph::new(lines),
@@ -2142,19 +2702,39 @@ impl App {
             ),
         );
     }
+    /// Pixel aspect (width / height) of the latest portrait frame.
+    fn portrait_aspect(&self) -> f32 {
+        420.0 / 620.0 // RENDERER-API: frame.width / frame.height
+    }
+    /// Ask the renderer for frames that fill this area at the terminal's pixel density.
+    fn request_view(&self, _area: Rect) {
+        // RENDERER-API: companion.set_view(width_px, height_px)
+    }
     fn draw_popup(
         f: &mut Frame,
         p: &mut Popup,
         returning: bool,
+        current_session: &str,
         area: Rect,
     ) -> Vec<(Rect, crate::actions::Action)> {
-        let width = area.width.saturating_sub(4).min(88);
-        let desired_height = if let Popup::Resources { items, .. } = p {
-            11 + 3 * items.len().min(5) as u16
-        } else {
-            28
+        let width = area.width.saturating_sub(2).min(96);
+        let text_height = |text: &str| {
+            wrap(text, width.saturating_sub(6) as usize).len() as u16
+                + 2
+                + if returning { 2 } else { 0 }
         };
-        let height = area.height.saturating_sub(4).min(desired_height);
+        let desired_height = match p {
+            Popup::Resources { items, .. } => 9 + 3 * items.len().min(5) as u16,
+            Popup::Delete => 7,
+            Popup::Redirect { input, .. } => text_height(input) + 6,
+            Popup::Question {
+                question, options, ..
+            } => text_height(question) + options.len() as u16 + 6,
+            Popup::Approval(a) => text_height(&a.preview).max(8),
+            Popup::Info { text, .. } => text_height(text).max(8),
+            _ => 30,
+        };
+        let height = area.height.saturating_sub(2).min(desired_height);
         let r = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -2162,32 +2742,81 @@ impl App {
             height,
         );
         f.render_widget(Clear, r);
-        f.render_widget(
-            Block::default()
+        let hints = match p {
+            Popup::Approval(_) => {
+                "y allow · n deny · ↑↓ scroll · F2 plan · F6 files · Ctrl+G redirect"
+            }
+            Popup::Question { .. } => "1–5 choose · Enter send · F6 files · Esc dismiss",
+            Popup::Redirect { .. } => "Enter send · Esc return to the decision",
+            Popup::Delete => "y delete · n keep · Esc cancel",
+            Popup::Info { .. } => "↑↓ PgUp PgDn scroll · Home End · Esc close",
+            Popup::Sessions {
+                confirm: Some(_), ..
+            } => "y delete it · any other key keeps it",
+            Popup::Sessions { .. } => {
+                "↑↓ choose · Enter open · Ctrl+N new · Ctrl+D delete · Esc close"
+            }
+            Popup::Resources { .. } => "↑↓ choose · Enter prepare · F1 inspect · Esc close",
+            Popup::Tasks { preview: true, .. } => {
+                "↑↓ scroll · Tab back to tasks · Enter run · Esc back"
+            }
+            Popup::Tasks { .. } => "↑↓ choose · Tab inspect · Enter run · Esc close",
+            Popup::History(history) if history.preview => "↑↓ scroll · Tab jump · Esc results",
+            Popup::History(_) => "↑↓ choose · Enter read · Tab jump · Esc close",
+            Popup::Actions(_) => "↑↓ or click · Enter open · Esc back",
+            Popup::Project(_) => "",
+        };
+        let hint_color = if matches!(p, Popup::Approval(_) | Popup::Question { .. }) {
+            GOLD
+        } else {
+            DIM
+        };
+        let frame = |title: &str| {
+            let mut block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(style(if hint_color == GOLD { GOLD } else { LINE }))
                 .style(style(FG))
-                .borders(Borders::ALL)
-                .border_style(style(LINE)),
-            r,
-        );
+                .title(Line::styled(
+                    format!(" {} ", clean(title)),
+                    style(JADE).add_modifier(Modifier::BOLD),
+                ));
+            if !hints.is_empty() {
+                block = block.title_bottom(Line::styled(
+                    format!(" {} ", fit_hint(hints, width.saturating_sub(6) as usize)),
+                    style(hint_color),
+                ));
+            }
+            block
+        };
         let inner = r.inner(Margin {
-            horizontal: 3,
-            vertical: 2,
+            horizontal: 2,
+            vertical: 1,
         });
+        let body_height = inner.height.saturating_sub(if returning { 2 } else { 0 });
+        let waiting = |f: &mut Frame| {
+            if returning {
+                f.render_widget(
+                    Paragraph::new("Decision still waiting · Esc back · Ctrl+G redirect")
+                        .style(style(GOLD)),
+                    Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+                );
+            }
+        };
         if let Popup::Actions(menu) = p {
+            f.render_widget(frame("Together with 弄玉"), r);
             let filtered = menu.filtered();
-            let visible = (inner.height.saturating_sub(7) / 2).max(1) as usize;
+            let visible = (body_height.saturating_sub(5) / 2).max(1) as usize;
             let mut rows = vec![];
             let mut write = |text: String, color, y| {
-                if y < inner.bottom() {
+                if y < inner.y + body_height {
                     f.render_widget(
                         Paragraph::new(text).style(style(color)),
                         Rect::new(inner.x, y, inner.width, 1),
                     );
                 }
             };
-            write("Together with 弄玉".into(), JADE, inner.y);
-            write("Local controls · no model request".into(), DIM, inner.y + 2);
-            write(format!("Find: {}", menu.query), FG, inner.y + 3);
+            write("Local controls · no model request".into(), DIM, inner.y);
+            write(format!("Find: {}▏", menu.query), FG, inner.y + 1);
             for (row, (index, choice)) in filtered
                 .iter()
                 .enumerate()
@@ -2195,7 +2824,7 @@ impl App {
                 .take(visible)
                 .enumerate()
             {
-                let y = inner.y + 5 + row as u16 * 2;
+                let y = inner.y + 3 + row as u16 * 2;
                 write(
                     format!(
                         "{} {}",
@@ -2215,12 +2844,12 @@ impl App {
                 write(
                     "No matching actions. Ctrl+U clears the filter.".into(),
                     DIM,
-                    inner.y + 5,
+                    inner.y + 3,
                 );
             }
             write(
                 format!(
-                    "↑↓ or click · Enter open · Esc back · {}/{}",
+                    "{}/{}",
                     if filtered.is_empty() {
                         0
                     } else {
@@ -2229,72 +2858,342 @@ impl App {
                     filtered.len()
                 ),
                 DIM,
-                inner.bottom().saturating_sub(1),
+                inner.y + body_height.saturating_sub(1),
             );
-            if returning {
-                f.render_widget(
-                    Paragraph::new("Decision still waiting · Esc back · Ctrl+G redirect")
-                        .style(style(GOLD)),
-                    Rect::new(inner.x, inner.bottom(), inner.width, 1),
-                );
-            }
+            waiting(f);
             return rows;
         }
-        let (title,text,scroll)=match p{
-   Popup::Tasks{catalog,query,index,preview,scroll}=>{
-       let filtered=catalog.tasks.iter().filter(|task|format!("{} {}",task.name,task.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();
-       if *preview && let Some(task)=filtered.get(*index){(format!("Project task · {}",task.name),task.details(),*scroll)}else{
-           let visible=(inner.height.saturating_sub(7)/3).max(1) as usize;
-           let query_line=wrap(&format!("Find: {query}"),inner.width as usize).first().cloned().unwrap_or_default();
-           let mut text=format!("{query_line}\nLocal commands · permissions apply\n\n");
-           for (i,task) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){
-               text+=&format!("{} {} · {}s\n  {}\n\n",if i==*index{"›"}else{" "},task.name,task.timeout_secs,wrap_prose(&task.description,inner.width.saturating_sub(4) as usize).first().cloned().unwrap_or_default());
-           }
-           if filtered.is_empty(){text+=&format!("No matching tasks.\n{}",catalog.notes.join("\n"));}
-           text+="\n↑↓ choose · Tab inspect · Enter run · Esc close";
-           ("Project tasks beside 弄玉".into(),text,0)
-       }
-   },
-   Popup::History(history)=>{
-       if history.preview && let Some(entry)=history.selected() {
-           let item=&history.items[entry];
-           let wrapped=wrap_prose(&item.text,inner.width as usize);
-           if history.focus_match {
-               let needle=history.needle();
-               history.scroll=if needle.is_empty(){0}else{wrapped.iter().position(|line|line.to_lowercase().contains(&needle)).unwrap_or(0).saturating_sub(2).min(u16::MAX as usize) as u16};
-               history.focus_match=false;
-           }
-           history.scroll=history.scroll.min(wrapped.len().saturating_sub(inner.height.saturating_sub(4) as usize).min(u16::MAX as usize) as u16);
-           (format!("Conversation #{} · {}",entry+1,item.role),wrapped.join("\n"),history.scroll)
-       } else {
-           let query=wrap(&format!("Find: {}",history.query),inner.width as usize).first().cloned().unwrap_or_default();
-           let mut text=format!("{query}\nFilter: you: · nongyu: · tool: · notice:\n\n");
-           let visible=(inner.height.saturating_sub(7)/3).max(1) as usize;
-           for (index,&entry) in history.matches.iter().enumerate().skip(history.index.saturating_sub(visible-1)).take(visible) {
-               let item=&history.items[entry];
-               let excerpt=wrap_prose(&item.text.replace('\n'," "),inner.width.saturating_sub(4) as usize).first().cloned().unwrap_or_default();
-               text+=&format!("{} #{} · {}\n  {}\n\n",if index==history.index{"›"}else{" "},entry+1,item.role,excerpt);
-           }
-           if history.matches.is_empty(){text+="No matching conversation entries.\n";}
-           text+=&format!("{} match{} · visible transcript only",history.matches.len(),if history.matches.len()==1{""}else{"es"});
-           ("History beside 弄玉".into(),text,0)
-       }
-   },
-   Popup::Actions(_)=>unreachable!("Action menu is rendered above"),
-   Popup::Project(nav)=>nav.view(inner.width as usize,inner.height as usize),
-   Popup::Resources{items,skills,query,index}=>{let filtered=items.iter().filter(|r|format!("{} {}",r.name,r.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();let visible=(inner.height.saturating_sub(6)/3).max(1) as usize;let mut text=format!("Find: {query}\n\n");for (i,r) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){text+=&format!("{} {}{}\n  {}\n\n",if i==*index{"›"}else{" "},r.name,if r.manual_only{" · explicit only"}else{""},{let lines=wrap_prose(&r.description.replace('\n'," "),inner.width.saturating_sub(4) as usize);format!("{}{}",lines.first().cloned().unwrap_or_default(),if lines.len()>1{"…"}else{""})});}if filtered.is_empty(){text+="No matching resources.\n";}text+="\n↑↓ choose · Enter prepare · F1 inspect · Esc close";(if *skills{"Skills beside 弄玉"}else{"Reusable prompts"}.into(),text,0)},
-   Popup::Redirect{input,..}=>("弄玉 · change direction".into(),format!("Tell me what to change.\nPending actions will be cancelled when you send.\n\n› {input}\n\nEnter send · Esc return to the decision"),0),
-   Popup::Question{question,options,input,..}=>("弄玉 · a question for you".into(),format!("{}\n\n{}\n\nOr type an answer:\n› {}",question,options.iter().enumerate().map(|(i,o)|format!("[{}] {o}",i+1)).collect::<Vec<_>>().join("\n"),input),0),
-   Popup::Info{title,text,scroll}=>(title.clone(),text.clone(),*scroll),
-   Popup::Approval(a)=>(format!("Allow {}?",a.tool),a.preview.clone(),a.scroll),
-   Popup::Delete=>("Delete this conversation?".into(),"The saved conversation will be removed.\nProject files stay in place.\n\n[y] delete    [n] keep    Esc cancels".into(),0),
-   Popup::Sessions{items,query,index}=>{let filtered=items.iter().filter(|s|s.title.to_lowercase().contains(&query.to_lowercase())||s.id.contains(query.as_str())).collect::<Vec<_>>();let mut text=format!("Find: {query}\n\n");for (i,s) in filtered.iter().enumerate().skip(index.saturating_sub((inner.height.saturating_sub(6)/2).max(1) as usize-1)).take((inner.height.saturating_sub(6)/2).max(1) as usize){text+=&format!("{} {}\n  {}  ·  {}\n",if i==*index{"›"}else{" "},s.title,&s.id[..6],if s.demo{"demo"}else{&s.model});}if filtered.is_empty(){text+="No matching sessions.\n"}text+="\n↑↓ choose    Enter resume    Esc close";("Your conversations".into(),text,0)}
-  };
-        f.render_widget(
-            Paragraph::new(title).style(style(JADE).add_modifier(Modifier::BOLD)),
-            Rect::new(inner.x, inner.y, inner.width, 1),
-        );
-        let diff_panel = matches!(p, Popup::Approval(a) if matches!(a.tool.as_str(), "write_file" | "edit_file"))
+        if let Popup::Sessions {
+            items,
+            query,
+            index,
+            confirm,
+        } = p
+        {
+            f.render_widget(frame("Your conversations"), r);
+            let filtered = filter_sessions(items, query);
+            let mut lines = vec![
+                Line::styled(format!("Find: {query}▏"), style(FG)),
+                Line::styled(
+                    format!(
+                        "{} conversation{} in this project",
+                        filtered.len(),
+                        if filtered.len() == 1 { "" } else { "s" }
+                    ),
+                    style(DIM),
+                ),
+                Line::default(),
+            ];
+            let visible = (body_height.saturating_sub(3) / 3).max(1) as usize;
+            let now = chrono::Utc::now();
+            for (i, s) in filtered
+                .iter()
+                .enumerate()
+                .skip(index.saturating_sub(visible - 1))
+                .take(visible)
+            {
+                let selected = i == *index;
+                let mut title = vec![
+                    Span::styled(
+                        format!("{} ", if selected { "›" } else { " " }),
+                        style(JADE),
+                    ),
+                    Span::styled(
+                        tools::clip(&clean(&s.title).replace('\n', " "), 70)
+                            .replace("\n… [truncated]", "…"),
+                        style(if selected { JADE } else { FG }).add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    ),
+                ];
+                if s.id == current_session {
+                    title.push(Span::styled("  ● current", style(GOLD)));
+                }
+                if confirm.as_deref() == Some(s.id.as_str()) {
+                    title.push(Span::styled("  delete? y / n", style(RED)));
+                }
+                lines.push(Line::from(title));
+                lines.push(Line::styled(
+                    format!(
+                        "  {} · {} messages · {} · {}",
+                        relative_time(&s.updated, now),
+                        s.entries.iter().filter(|e| e.role == "you").count(),
+                        if s.demo { "demo" } else { s.model.as_str() },
+                        &s.id[..6]
+                    ),
+                    style(DIM),
+                ));
+                let first = s
+                    .entries
+                    .iter()
+                    .find(|e| e.role == "you")
+                    .map(|e| clean(&e.text).replace('\n', " "))
+                    .unwrap_or_default();
+                lines.push(Line::styled(
+                    format!(
+                        "  {}",
+                        wrap(&first, inner.width.saturating_sub(4) as usize)
+                            .first()
+                            .cloned()
+                            .unwrap_or_default()
+                    ),
+                    style(DIM),
+                ));
+            }
+            if filtered.is_empty() {
+                lines.push(Line::styled("No matching conversations.", style(DIM)));
+            }
+            f.render_widget(
+                Paragraph::new(lines),
+                Rect::new(inner.x, inner.y, inner.width, body_height),
+            );
+            waiting(f);
+            return vec![];
+        }
+        let (title, text, scroll) = match p {
+            Popup::Tasks {
+                catalog,
+                query,
+                index,
+                preview,
+                scroll,
+            } => {
+                let filtered = catalog
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        format!("{} {}", task.name, task.description)
+                            .to_lowercase()
+                            .contains(&query.to_lowercase())
+                    })
+                    .collect::<Vec<_>>();
+                if *preview && let Some(task) = filtered.get(*index) {
+                    (
+                        format!("Project task · {}", task.name),
+                        task.details(),
+                        *scroll,
+                    )
+                } else {
+                    let visible = (body_height.saturating_sub(4) / 3).max(1) as usize;
+                    let query_line = wrap(&format!("Find: {query}▏"), inner.width as usize)
+                        .first()
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut text = format!("{query_line}\nLocal commands · permissions apply\n\n");
+                    for (i, task) in filtered
+                        .iter()
+                        .enumerate()
+                        .skip(index.saturating_sub(visible - 1))
+                        .take(visible)
+                    {
+                        text += &format!(
+                            "{} {} · {}s\n  {}\n\n",
+                            if i == *index { "›" } else { " " },
+                            task.name,
+                            task.timeout_secs,
+                            wrap_prose(&task.description, inner.width.saturating_sub(4) as usize)
+                                .first()
+                                .cloned()
+                                .unwrap_or_default()
+                        );
+                    }
+                    if filtered.is_empty() {
+                        text += &format!("No matching tasks.\n{}", catalog.notes.join("\n"));
+                    }
+                    ("Project tasks beside 弄玉".into(), text, 0)
+                }
+            }
+            Popup::History(history) => {
+                if history.preview
+                    && let Some(entry) = history.selected()
+                {
+                    let item = &history.items[entry];
+                    let wrapped = wrap_prose(&item.text, inner.width as usize);
+                    if history.focus_match {
+                        let needle = history.needle();
+                        history.scroll = if needle.is_empty() {
+                            0
+                        } else {
+                            wrapped
+                                .iter()
+                                .position(|line| line.to_lowercase().contains(&needle))
+                                .unwrap_or(0)
+                                .saturating_sub(2)
+                                .min(u16::MAX as usize) as u16
+                        };
+                        history.focus_match = false;
+                    }
+                    history.scroll = history.scroll.min(
+                        wrapped
+                            .len()
+                            .saturating_sub(body_height.saturating_sub(1) as usize)
+                            .min(u16::MAX as usize) as u16,
+                    );
+                    (
+                        format!("Conversation #{} · {}", entry + 1, item.role),
+                        wrapped.join("\n"),
+                        history.scroll,
+                    )
+                } else {
+                    let query = wrap(&format!("Find: {}▏", history.query), inner.width as usize)
+                        .first()
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut text = format!("{query}\nFilter: you: · nongyu: · tool: · notice:\n\n");
+                    let visible = (body_height.saturating_sub(5) / 3).max(1) as usize;
+                    for (index, &entry) in history
+                        .matches
+                        .iter()
+                        .enumerate()
+                        .skip(history.index.saturating_sub(visible - 1))
+                        .take(visible)
+                    {
+                        let item = &history.items[entry];
+                        let excerpt = wrap_prose(
+                            &item.text.replace('\n', " "),
+                            inner.width.saturating_sub(4) as usize,
+                        )
+                        .first()
+                        .cloned()
+                        .unwrap_or_default();
+                        text += &format!(
+                            "{} #{} · {}\n  {}\n\n",
+                            if index == history.index { "›" } else { " " },
+                            entry + 1,
+                            item.role,
+                            excerpt
+                        );
+                    }
+                    if history.matches.is_empty() {
+                        text += "No matching conversation entries.\n";
+                    }
+                    text += &format!(
+                        "{} match{} · visible transcript only",
+                        history.matches.len(),
+                        if history.matches.len() == 1 { "" } else { "es" }
+                    );
+                    ("History beside 弄玉".into(), text, 0)
+                }
+            }
+            Popup::Actions(_) | Popup::Sessions { .. } => unreachable!("Rendered above"),
+            Popup::Project(nav) => nav.view(inner.width as usize, body_height as usize),
+            Popup::Resources {
+                items,
+                skills,
+                query,
+                index,
+            } => {
+                let filtered = items
+                    .iter()
+                    .filter(|r| {
+                        format!("{} {}", r.name, r.description)
+                            .to_lowercase()
+                            .contains(&query.to_lowercase())
+                    })
+                    .collect::<Vec<_>>();
+                let visible = (body_height.saturating_sub(3) / 3).max(1) as usize;
+                let mut text = format!("Find: {query}▏\n\n");
+                for (i, r) in filtered
+                    .iter()
+                    .enumerate()
+                    .skip(index.saturating_sub(visible - 1))
+                    .take(visible)
+                {
+                    text += &format!(
+                        "{} {}{}\n  {}\n\n",
+                        if i == *index { "›" } else { " " },
+                        r.name,
+                        if r.manual_only {
+                            " · explicit only"
+                        } else {
+                            ""
+                        },
+                        {
+                            let lines = wrap_prose(
+                                &r.description.replace('\n', " "),
+                                inner.width.saturating_sub(4) as usize,
+                            );
+                            format!(
+                                "{}{}",
+                                lines.first().cloned().unwrap_or_default(),
+                                if lines.len() > 1 { "…" } else { "" }
+                            )
+                        }
+                    );
+                }
+                if filtered.is_empty() {
+                    text += "No matching resources.\n";
+                }
+                (
+                    if *skills {
+                        "Skills beside 弄玉"
+                    } else {
+                        "Reusable prompts"
+                    }
+                    .into(),
+                    text,
+                    0,
+                )
+            }
+            Popup::Redirect { input, .. } => (
+                "弄玉 · change direction".into(),
+                format!(
+                    "Tell me what to change.\nPending actions will be cancelled when you send.\n\n› {input}▏"
+                ),
+                0,
+            ),
+            Popup::Question {
+                question,
+                options,
+                input,
+                ..
+            } => (
+                "弄玉 · a question for you".into(),
+                format!(
+                    "{}\n\n{}\n\nOr type an answer:\n› {}▏",
+                    question,
+                    options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, o)| format!("[{}] {o}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    input
+                ),
+                0,
+            ),
+            Popup::Info {
+                title,
+                text,
+                scroll,
+            } => {
+                let lines = wrap(text, inner.width as usize).len();
+                *scroll = (*scroll).min(
+                    lines
+                        .saturating_sub(body_height as usize)
+                        .min(u16::MAX as usize) as u16,
+                );
+                (title.clone(), text.clone(), *scroll)
+            }
+            Popup::Approval(a) => {
+                let lines = wrap(&a.preview, inner.width as usize).len();
+                a.scroll = a.scroll.min(
+                    lines
+                        .saturating_sub(body_height as usize)
+                        .min(u16::MAX as usize) as u16,
+                );
+                (format!("Allow {}?", a.tool), a.preview.clone(), a.scroll)
+            }
+            Popup::Delete => (
+                "Delete this conversation?".into(),
+                "The saved conversation will be removed.\nProject files stay in place.".into(),
+                0,
+            ),
+        };
+        f.render_widget(frame(&title), r);
+        let diff_panel = matches!(p, Popup::Approval(a) if matches!(a.tool.as_str(), "write_file" | "edit_file" | "multi_edit" | "delete_file" | "move_file"))
             || matches!(p, Popup::Info{title,..} if title.starts_with("Review changes"));
         let body = if diff_panel {
             ratatui::text::Text::from(crate::richtext::diff(&text, inner.width as usize))
@@ -2306,47 +3205,117 @@ impl App {
                 .style(style(FG))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0)),
-            Rect::new(
-                inner.x,
-                inner.y + 2,
-                inner.width,
-                inner.height.saturating_sub(3),
-            ),
+            Rect::new(inner.x, inner.y, inner.width, body_height),
         );
-        if let Popup::History(history) = p {
-            f.render_widget(
-                Paragraph::new(if history.preview {
-                    "↑↓ scroll · Tab jump · Esc results"
-                } else {
-                    "↑↓ choose · Enter read · Tab jump · Esc close"
-                })
-                .style(style(DIM)),
-                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-            );
-        }
-        if returning {
-            f.render_widget(
-                Paragraph::new("Decision still waiting · Esc back · Ctrl+G redirect")
-                    .style(style(GOLD)),
-                Rect::new(inner.x, inner.bottom(), inner.width, 1),
-            );
-        }
-        if matches!(p, Popup::Approval(_)) {
-            f.render_widget(
-                Paragraph::new("y allow · n deny · F2 plan · F6 files · Ctrl+G redirect")
-                    .style(style(GOLD)),
-                Rect::new(inner.x, inner.bottom(), inner.width, 1),
-            );
-        }
-        if matches!(p, Popup::Question { .. }) {
-            f.render_widget(
-                Paragraph::new("1–5 choose · Enter send · F6 files · Esc dismiss")
-                    .style(style(GOLD)),
-                Rect::new(inner.x, inner.bottom(), inner.width, 1),
-            );
-        }
+        waiting(f);
         vec![]
     }
+}
+fn filter_sessions<'a>(items: &'a [Session], query: &str) -> Vec<&'a Session> {
+    let query = query.to_lowercase();
+    items
+        .iter()
+        .filter(|s| {
+            query.is_empty()
+                || s.title.to_lowercase().contains(&query)
+                || s.id.contains(&query)
+                || s.entries
+                    .iter()
+                    .filter(|e| e.role == "you")
+                    .take(3)
+                    .any(|e| e.text.to_lowercase().contains(&query))
+        })
+        .collect()
+}
+fn relative_time(stamp: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(stamp) else {
+        return "earlier".into();
+    };
+    let seconds = (now - then.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    match seconds {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86_400 => format!("{} h ago", seconds / 3600),
+        86_400..604_800 => format!("{} d ago", seconds / 86_400),
+        _ => then.format("%Y-%m-%d").to_string(),
+    }
+}
+/// Drop whole " · " separated hints from the end until the line fits.
+fn fit_hint(hint: &str, width: usize) -> String {
+    let mut parts = hint.split(" · ").collect::<Vec<_>>();
+    while parts.len() > 1 && parts.join(" · ").width() > width {
+        parts.pop();
+    }
+    let text = parts.join(" · ");
+    if text.width() <= width {
+        return text;
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if out.width() + unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) + 1 > width {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+fn compact_count(n: u64) -> String {
+    match n {
+        0..1000 => n.to_string(),
+        1000..1_000_000 => format!("{:.1}k", n as f64 / 1000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
+}
+/// Terminal cell size in pixels; a common 1:2 cell when the terminal does not say.
+fn cell_pixels() -> (f32, f32) {
+    crossterm::terminal::window_size()
+        .ok()
+        .filter(|w| w.width > 0 && w.height > 0 && w.columns > 0 && w.rows > 0)
+        .map(|w| {
+            (
+                f32::from(w.width) / f32::from(w.columns),
+                f32::from(w.height) / f32::from(w.rows),
+            )
+        })
+        .filter(|(w, h)| (2.0..=64.0).contains(w) && (4.0..=128.0).contains(h))
+        .unwrap_or((9.0, 18.0))
+}
+/// The largest area inside `area` with the given pixel aspect, centered horizontally.
+fn fit(area: Rect, aspect: f32, cell: (f32, f32)) -> Rect {
+    if area.width == 0 || area.height == 0 || aspect <= 0.0 {
+        return area;
+    }
+    let width_px = f32::from(area.width) * cell.0;
+    let height_px = f32::from(area.height) * cell.1;
+    let (width, height) = if width_px / height_px > aspect {
+        (
+            ((height_px * aspect / cell.0).round() as u16).clamp(1, area.width),
+            area.height,
+        )
+    } else {
+        (
+            area.width,
+            ((width_px / aspect / cell.1).round() as u16).clamp(1, area.height),
+        )
+    };
+    Rect::new(area.x + (area.width - width) / 2, area.y, width, height)
+}
+/// Earlier requests from this project's recent conversations, oldest first.
+fn recent_prompts(store: &Store, current: &Session) -> Vec<String> {
+    let mut sessions = store.list(&current.project).unwrap_or_default();
+    sessions.retain(|s| s.id != current.id);
+    sessions.truncate(8);
+    sessions.reverse();
+    sessions.push(current.clone());
+    sessions
+        .iter()
+        .flat_map(|s| s.entries.iter())
+        .filter(|e| e.role == "you" && !e.text.starts_with("Answer: "))
+        .map(|e| e.text.clone())
+        .collect()
 }
 pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -2402,6 +3371,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         app.paste(&text);
                     }
                     TermEvent::Resize(_, _) => {
+                        app.cell_px = cell_pixels();
                         write!(io::stdout(), "{}", app.graphics.clear())?;
                         terminal.resize(terminal.size()?.into())?;
                         app.last_image = None;
@@ -2410,16 +3380,25 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
                             if app.popup.is_some() {
-                                if let Err(e) = app.key(KeyEvent::new(
-                                    if up { KeyCode::Up } else { KeyCode::Down },
-                                    KeyModifiers::NONE,
-                                )) {
-                                    app.notify(e.to_string());
+                                // Reading panels scroll like the transcript; lists move one row.
+                                let steps = if matches!(
+                                    app.popup,
+                                    Some(Popup::Info { .. } | Popup::Approval(_))
+                                ) {
+                                    3
+                                } else {
+                                    1
+                                };
+                                for _ in 0..steps {
+                                    if let Err(e) = app.key(KeyEvent::new(
+                                        if up { KeyCode::Up } else { KeyCode::Down },
+                                        KeyModifiers::NONE,
+                                    )) {
+                                        app.notify(e.to_string());
+                                    }
                                 }
-                            } else if up {
-                                app.scroll += 3;
                             } else {
-                                app.scroll = app.scroll.saturating_sub(3);
+                                app.scroll_by(if up { 3 } else { -3 });
                             }
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
@@ -2699,6 +3678,7 @@ mod layout_tests {
             pet: root.join("pet"),
             chrome: root.join("chrome"),
             texture_size: 2048,
+            limits: Default::default(),
         };
         let store = Store::open(&cfg.state).unwrap();
         App::new(cfg, cli, store).unwrap()
@@ -2865,21 +3845,24 @@ mod layout_tests {
             .unwrap();
         let mut terminal = Terminal::new(TestBackend::new(132, 42)).unwrap();
         terminal.draw(|f| a.draw(f)).unwrap();
-        let before = terminal.backend().buffer().clone();
-        assert!(
-            before
-                .content
-                .iter()
-                .map(|c| c.symbol())
-                .collect::<String>()
-                .contains("Earlier request number 20")
-        );
+        fn rows(buffer: &ratatui::buffer::Buffer, range: std::ops::Range<u16>) -> Vec<String> {
+            range
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect()
+                })
+                .collect()
+        }
+        let before = rows(terminal.backend().buffer(), 0..30);
+        assert!(before.concat().contains("Earlier request number 20"));
         a.session.add(
             "nongyu",
             "A later message that should not move the history viewport.",
         );
         terminal.draw(|f| a.draw(f)).unwrap();
-        assert_eq!(terminal.backend().buffer(), &before);
+        // The transcript viewport stays put; only the "newer lines" count changes.
+        assert_eq!(rows(terminal.backend().buffer(), 0..30), before);
         a.key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))
             .unwrap();
         terminal.draw(|f| a.draw(f)).unwrap();
@@ -2893,7 +3876,7 @@ mod layout_tests {
                 .collect::<String>()
                 .contains("A later message that should not move")
         );
-        assert_eq!(a.input, "Keep my next request");
+        assert_eq!(a.composer.text, "Keep my next request");
         assert!(a.session.messages.is_empty());
     }
     #[test]
@@ -2929,14 +3912,14 @@ mod layout_tests {
         assert!(matches!(&a.popup, Some(Popup::Resources{query,..}) if query=="review"));
         a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(a.input, "/skill review Explain this change 中文");
+        assert_eq!(a.composer.text, "/skill review Explain this change 中文");
         assert!(a.session.messages.is_empty());
         a.command("/sessions").unwrap();
         a.paste("fresh");
         assert!(matches!(&a.popup, Some(Popup::Sessions{query,..}) if query=="fresh"));
         a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(a.input, "/skill review Explain this change 中文");
+        assert_eq!(a.composer.text, "/skill review Explain this change 中文");
     }
     #[test]
     fn companion_actions_support_mouse_and_preserve_pending_decisions() {
@@ -2974,7 +3957,7 @@ mod layout_tests {
         a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(a.popup, Some(Popup::Approval(_))));
-        assert_eq!(a.input, "Keep this composer draft");
+        assert_eq!(a.composer.text, "Keep this composer draft");
         assert!(a.session.messages.is_empty());
         assert_eq!(a.session.work.model_requests, 0);
     }
@@ -3030,7 +4013,7 @@ mod layout_tests {
         a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(rx.recv().unwrap(), "中文");
-        assert_eq!(a.input, "Keep my draft");
+        assert_eq!(a.composer.text, "Keep my draft");
     }
     #[test]
     fn closed_decisions_cannot_return_from_an_inspection_or_redirect() {
@@ -3098,7 +4081,7 @@ mod layout_tests {
         }
         a.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(a.input, "Explain this @{notes.txt:1-80} ");
+        assert_eq!(a.composer.text, "Explain this @{notes.txt:1-80} ");
         assert!(a.popup.is_none());
         assert!(a.running.is_none());
         assert!(a.session.messages.is_empty());
@@ -3138,7 +4121,7 @@ mod layout_tests {
             .unwrap();
         assert!(matches!(&a.popup, Some(Popup::Question{input,..}) if input == "Partial answer"));
         assert!(rx.try_recv().is_err());
-        assert_eq!(a.input, "Keep my draft");
+        assert_eq!(a.composer.text, "Keep my draft");
         assert_eq!(a.session.work.model_requests, 0);
     }
     #[test]
@@ -3157,7 +4140,7 @@ mod layout_tests {
         a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(rx.recv().unwrap(), "中文");
-        assert_eq!(a.input, "Keep my draft");
+        assert_eq!(a.composer.text, "Keep my draft");
     }
     #[test]
     fn redirect_can_return_to_decision_or_cancel_it_with_new_input() {
@@ -3195,7 +4178,7 @@ mod layout_tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(a.input, "Keep this draft");
+        assert_eq!(a.composer.text, "Keep this draft");
         assert!(!d.path().join("stale.json").exists());
         assert!(d.path().join("steered.json").exists());
         assert!(a.session.pending.is_empty());
@@ -3232,7 +4215,7 @@ mod layout_tests {
             .unwrap();
         a.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(a.input, "好Aster");
+        assert_eq!(a.composer.text, "好Aster");
         a.command("/rename Test parent").unwrap();
         let parent = a.session.id.clone();
         a.command("/fork Test child").unwrap();
@@ -3240,11 +4223,165 @@ mod layout_tests {
         assert_eq!(a.store.load(&parent).unwrap().title, "Test parent");
         assert_eq!(a.session.title, "Test child");
     }
+    fn screen(a: &mut App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn press(a: &mut App, code: KeyCode) {
+        a.key(KeyEvent::new(code, KeyModifiers::NONE)).unwrap();
+    }
+    #[test]
+    fn arrow_keys_recall_prompts_and_never_strand_the_transcript() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.prompts.push("first request");
+        a.prompts.push("second request");
+        a.input_set("unsent draft");
+        // Old behavior: ↑ silently scrolled a short transcript and pinned the view.
+        press(&mut a, KeyCode::Up);
+        assert_eq!(a.composer.text, "second request");
+        press(&mut a, KeyCode::Up);
+        assert_eq!(a.composer.text, "first request");
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Down);
+        assert_eq!(a.composer.text, "unsent draft");
+        for _ in 0..20 {
+            press(&mut a, KeyCode::Up);
+            press(&mut a, KeyCode::PageUp);
+        }
+        screen(&mut a, 100, 30);
+        assert_eq!(a.scroll, 0, "nothing to scroll in an empty conversation");
+        // History stops at the oldest request, and ↓ walks back to the draft.
+        assert_eq!(a.composer.text, "first request");
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Down);
+        assert_eq!(a.composer.text, "unsent draft");
+        for n in 0..60 {
+            a.session.add("nongyu", format!("reply number {n}"));
+        }
+        let visible = screen(&mut a, 100, 30);
+        assert!(visible.contains("reply number 59"), "{visible}");
+        press(&mut a, KeyCode::PageUp);
+        let scrolled = screen(&mut a, 100, 30);
+        assert!(a.scroll > 0 && !scrolled.contains("reply number 59"));
+        assert!(scrolled.contains("newer lines"));
+        for _ in 0..500 {
+            press(&mut a, KeyCode::PageUp);
+        }
+        assert_eq!(a.scroll, a.scroll_max, "scrolling stops at the first line");
+        screen(&mut a, 100, 30);
+        press(&mut a, KeyCode::PageDown);
+        assert!(
+            a.scroll < a.scroll_max,
+            "one PageDown moves back immediately"
+        );
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.scroll, 0);
+        assert_eq!(a.composer.text, "unsent draft");
+        assert!(screen(&mut a, 100, 30).contains("reply number 59"));
+    }
+    #[test]
+    fn escape_and_ctrl_c_clear_drafts_recoverably_and_option_arrows_type_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.input_set("abc");
+        a.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT))
+            .unwrap();
+        a.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+            .unwrap();
+        assert_eq!(a.composer.text, "abc");
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.composer.text, "abc", "one Esc only warns");
+        press(&mut a, KeyCode::Esc);
+        assert!(a.composer.is_empty());
+        press(&mut a, KeyCode::Up);
+        assert_eq!(a.composer.text, "abc");
+        a.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(a.composer.is_empty() && !a.quit);
+        a.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(a.quit);
+        // Esc closes the command palette it opened.
+        drop(a);
+        let mut a = app(d.path());
+        a.input_set("/");
+        assert!(!a.suggestions().is_empty());
+        press(&mut a, KeyCode::Esc);
+        assert!(a.composer.is_empty());
+    }
+    #[test]
+    fn session_picker_opens_another_conversation_and_confirms_deletes() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.command("/rename Older work").unwrap();
+        a.session.add("you", "Please fix the parser");
+        a.persist().unwrap();
+        let older = a.session.id.clone();
+        a.command("/new Scratch").unwrap();
+        let scratch = a.session.id.clone();
+        a.command("/new Current").unwrap();
+        let current = a.session.id.clone();
+        a.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .unwrap();
+        let text = screen(&mut a, 132, 42);
+        assert!(text.contains("Your conversations") && text.contains("● current"));
+        // The default selection is the most recent other conversation.
+        assert!(
+            matches!(&a.popup, Some(Popup::Sessions{items,index,..}) if items[*index].id != current)
+        );
+        a.paste("parser");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.session.id, older);
+        assert!(a.popup.is_none());
+        assert!(screen(&mut a, 132, 42).contains("Please fix the parser"));
+        a.command("/sessions").unwrap();
+        a.paste("Scratch");
+        a.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(screen(&mut a, 132, 42).contains("delete? y / n"));
+        press(&mut a, KeyCode::Char('y'));
+        assert!(a.store.load(&scratch).is_err());
+        assert!(a.store.load(&current).is_ok());
+        assert!(matches!(a.popup, Some(Popup::Sessions { .. })));
+        press(&mut a, KeyCode::Esc);
+        assert!(a.popup.is_none());
+        assert_eq!(a.session.id, older);
+    }
+    #[test]
+    fn background_compaction_summarizes_without_blocking_the_terminal() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        for n in 0..8 {
+            a.session.add("you", format!("request {n}"));
+            a.session.messages.extend([
+                json!({"role":"user","content":format!("request {n}")}),
+                json!({"role":"assistant","content":[{"type":"text","text":"x".repeat(12_000)}]}),
+            ]);
+        }
+        a.persist().unwrap();
+        a.command("/compact keep the parser API").unwrap();
+        assert!(a.running.is_some());
+        finish(&mut a);
+        let checkpoint = a.session.checkpoint.as_ref().unwrap();
+        assert_eq!(checkpoint.method, "demo");
+        assert_eq!(checkpoint.note, "keep the parser API");
+        assert!(a.store.load(&a.session.id).unwrap().checkpoint.is_some());
+        assert!(a.session.messages.len() < 16);
+        a.command("/compact auto off").unwrap();
+        assert!(!a.session.auto_compact);
+        assert!(screen(&mut a, 132, 42).contains("auto-compact off"));
+    }
     #[test]
     fn multiline_composer_follows_the_cursor() {
         let d = tempfile::tempdir().unwrap();
         let mut a = app(d.path());
-        a.input_set("FIRST\nsecond\nthird\nfourth\nfifth\nsixth\nLAST");
+        a.input_set("FIRST\nsecond\nthird\nfourth\nfifth\nsixth\nseventh\nLAST");
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         a.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
             .unwrap();
@@ -3256,7 +4393,22 @@ mod layout_tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
+        // One Home reaches the start of the line; the draft shows six rows.
+        assert!(text.contains("LAST") && !text.contains("FIRST"));
+        a.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
         assert!(text.contains("FIRST"));
+        // End, End: the end of the line, then of the draft.
+        a.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .unwrap();
         a.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
             .unwrap();
         terminal.draw(|f| a.draw(f)).unwrap();

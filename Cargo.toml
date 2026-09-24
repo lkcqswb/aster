@@ -1,6 +1,6 @@
 [package]
 name = "aster"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 description = "A character-led terminal agent, with Nongyu Live2D"
 
@@ -8,7 +8,7 @@ description = "A character-led terminal agent, with Nongyu Live2D"
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
 crossbeam-channel = "0.5"
 fs2 = "0.4"

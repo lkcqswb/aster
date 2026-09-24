@@ -47,7 +47,7 @@ def main():
         def send(command,needle):
             def composer():
                 return next((line.split('›',1)[1] for line in screen_text(screen).splitlines()[-5:]
-                             if line.lstrip().startswith('›')), '')
+                             if line.lstrip(' │').startswith('›')), '')
             child.send('\x1b[200~'+command+'\x1b[201~')
             deadline=time.monotonic()+12
             while time.monotonic()<deadline:
@@ -76,7 +76,7 @@ def main():
             assert not (project/'aster-demo.json').exists()
             child.send('y');wait('check_file',timeout=15)
             wait('已通过独立 JSON 检查',timeout=15)
-            wait('·  ready',timeout=15)
+            wait('● ready',timeout=15)
             assert json.loads((project/'aster-demo.json').read_text())=={'companion':'弄玉','ready':True}
             send('/fork Jade branch','Jade branch')
             send('/sessions','Your conversations')

@@ -69,6 +69,17 @@ pub struct Session {
     pub pending: Vec<PendingMessage>,
     #[serde(default)]
     pub checkpoint: Option<crate::compaction::Checkpoint>,
+    /// Input tokens the provider reported for the latest request (the context size).
+    #[serde(default)]
+    pub context_tokens: u64,
+    /// Serialized request bytes for that same request, used to estimate new context.
+    #[serde(default)]
+    pub context_bytes: u64,
+    #[serde(default = "enabled")]
+    pub auto_compact: bool,
+}
+fn enabled() -> bool {
+    true
 }
 impl Session {
     pub fn new(project: PathBuf, model: String, demo: bool) -> Self {
@@ -94,7 +105,24 @@ impl Session {
             work: Default::default(),
             pending: vec![],
             checkpoint: None,
+            context_tokens: 0,
+            context_bytes: 0,
+            auto_compact: true,
         }
+    }
+    /// Estimated context tokens for the next request. The bytes-per-token ratio is
+    /// calibrated from the provider's own count for the latest request when known.
+    pub fn context_estimate(&self, extra_bytes: usize) -> u64 {
+        let bytes = serde_json::to_vec(&self.messages)
+            .map(|v| v.len())
+            .unwrap_or(0)
+            + extra_bytes;
+        let ratio = if self.context_tokens > 0 && self.context_bytes > 0 {
+            (self.context_bytes as f64 / self.context_tokens as f64).clamp(1.5, 6.0)
+        } else {
+            3.0
+        };
+        (bytes as f64 / ratio) as u64
     }
     pub fn add(&mut self, role: &str, text: impl Into<String>) {
         self.entries.push(Entry {
@@ -155,10 +183,8 @@ impl Store {
         session: &Session,
         prepared: crate::compaction::Prepared,
     ) -> Result<Session> {
-        let archive = self.root.join("archive");
-        fs::create_dir_all(&archive)?;
         // Archive first; a failed save never replaces the active conversation in memory.
-        atomic_json(&archive.join(&prepared.checkpoint.archive), session)?;
+        write_archive(&self.root, session, &prepared.checkpoint.archive)?;
         let mut compacted = session.clone();
         compacted.messages = prepared.messages;
         compacted.checkpoint = Some(prepared.checkpoint);
@@ -228,6 +254,20 @@ impl Store {
         private_write(&path, text.as_bytes())?;
         Ok(path)
     }
+}
+/// Save the complete conversation before any context is replaced.
+pub fn write_archive(root: &Path, session: &Session, name: &str) -> Result<()> {
+    if name.contains(['/', '\\']) || name.starts_with('.') || !name.ends_with(".json") {
+        bail!("Invalid archive name");
+    }
+    let archive = root.join("archive");
+    fs::create_dir_all(&archive)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o700))?;
+    }
+    atomic_json(&archive.join(name), session)
 }
 pub fn private_write(path: &Path, data: &[u8]) -> Result<()> {
     let mut opts = OpenOptions::new();

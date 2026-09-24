@@ -702,6 +702,7 @@ mod tests {
             pet,
             chrome: root.path().join("chrome"),
             texture_size: 1024,
+            limits: Default::default(),
         };
         let server = assets(&cfg).unwrap();
         let client = reqwest::blocking::Client::builder()
@@ -779,6 +780,7 @@ mod tests {
             pet: root.path().join("pet"),
             chrome: root.path().join("missing-chrome"),
             texture_size: 2048,
+            limits: Default::default(),
         };
         let companion = Companion::start(cfg.clone());
         let deadline = Instant::now() + Duration::from_secs(3);

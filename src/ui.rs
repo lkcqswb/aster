@@ -3894,6 +3894,7 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
     store.save(&s)?;
     let running = agent::spawn(prior, prompt.into(), cfg, cli.permissions);
     let mut stopping = None;
+    let mut cues = crate::emotion::Cues::default();
     loop {
         if crate::lifecycle::requested() {
             running.cancel.store(true, Ordering::Relaxed);
@@ -3915,10 +3916,14 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
         };
         match event {
             Event::Delta(t) => {
-                print!("{}", clean(&t));
+                print!("{}", clean(&cues.feed(&t)));
                 io::stdout().flush()?;
             }
             Event::Entry(role, text) if role != "nongyu" => println!("\n[{role}] {}", clean(&text)),
+            Event::Entry(..) => {
+                print!("{}", clean(&cues.finish()));
+                cues.take();
+            }
             Event::Approval { answer, .. } => {
                 let _ = answer.send(false);
                 eprintln!(

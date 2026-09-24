@@ -48,4 +48,8 @@ Signal-aware shutdown, session checkpoints on interrupted work, and shared owner
 
 Check identities and edit revisions distinguish current failures, successful repairs, stale passes and earlier results. The companion uses that evidence for her reaction and status. F5 opens the underlying history beside her. Manual file checks update the same record and preserve valid tool/result pairs in the next model context without a model call.
 
-Next: stronger project search and larger source-file navigation.
+## Delivered in 0.10
+
+Project-aware file listing and search with ignore rules, scopes, globs, case control, regular expressions, context lines and honest continuation/scan limits. Large-source reads continue through long Unicode lines; focused edits preserve the rest of files up to 2 MB. The companion records actual discovered locations in her work card.
+
+Next: a project picker beside the companion and direct navigation from search results.

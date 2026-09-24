@@ -1,6 +1,6 @@
 [package]
 name = "aster"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "A character-led terminal agent, with Nongyu Live2D"
 
@@ -25,6 +25,9 @@ tiny_http = "0.12"
 tungstenite = "0.30"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
 
 [profile.release]
 strip = true

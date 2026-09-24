@@ -58,6 +58,7 @@ pub struct Work {
     pub command: Option<crate::tools::CommandProgress>,
     pub model_requests: u64,
     pub revision: u64,
+    pub discovery: String,
 }
 impl Work {
     pub fn begin(prompt: &str) -> Self {
@@ -97,6 +98,47 @@ impl Work {
             self.focus = crate::tools::clip(subject, 240);
         }
         self.waiting.clear();
+        if name == "search"
+            && !error
+            && let Some(matches) = result["matches"].as_array()
+        {
+            self.focus = format!(
+                "Finding · {}",
+                crate::tools::clip(args["query"].as_str().unwrap_or(""), 180)
+            );
+            self.discovery = format!(
+                "{} matching lines · {} files read\n{}",
+                matches.len(),
+                result["scanned_files"].as_u64().unwrap_or(0),
+                matches
+                    .iter()
+                    .take(8)
+                    .map(|hit| format!("{}:{}", hit["path"].as_str().unwrap_or(""), hit["line"]))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            if result["truncated"] == true {
+                self.discovery += "\nMore results or a scan limit · narrow the search or continue";
+            }
+        }
+        if name == "list_files"
+            && !error
+            && let Some(files) = result["files"].as_array()
+        {
+            self.discovery = format!(
+                "{} project files listed\n{}",
+                files.len(),
+                files
+                    .iter()
+                    .take(8)
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            if result["truncated"] == true {
+                self.discovery += "\nMore files or a scan limit · narrow the list or continue";
+            }
+        }
         if name == "read_skill"
             && !error
             && let Some(skill) = result["skill"].as_str()
@@ -238,6 +280,9 @@ impl Work {
         }
         if !self.context_files.is_empty() {
             out += &format!("\nAttached files\n{}\n", self.context_files.join("\n"));
+        }
+        if !self.discovery.is_empty() {
+            out += &format!("\nFound in the project\n{}\n", self.discovery);
         }
         if let Some(command) = &self.command {
             out += &format!(

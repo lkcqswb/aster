@@ -89,7 +89,7 @@ def main():
             validation=subprocess.run(['python3','-m','unittest','-v'],cwd=project,capture_output=True,text=True,timeout=15)
             assert validation.returncode==0,validation.stderr
             assert result['work']['steps'] and result['work']['changed']==['calculate.py']
-            assert any(e['passed'] and e['label'].startswith('shell') for e in result['work']['evidence'])
+            assert any(e['passed'] and json.loads(e['identity'])[0]=='shell' for e in result['work']['evidence'])
             child.send('/quit\r');deadline=time.monotonic()+12
             while time.monotonic()<deadline:
                 try:pump()

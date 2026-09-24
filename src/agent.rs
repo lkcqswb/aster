@@ -412,7 +412,16 @@ fn turn_with_input(
                         )
                     }
                     if let Some(file) = args["path"].as_str() {
-                        let path = tools::path(&s.project, file)?;
+                        let path = if matches!(name, "list_files" | "search") {
+                            let directory = if file == "." {
+                                s.project.clone()
+                            } else {
+                                tools::path(&s.project, file)?
+                            };
+                            directory.join("__aster_directory_scope__")
+                        } else {
+                            tools::path(&s.project, file)?
+                        };
                         let fresh = instructions::scoped(&s.project, &path)?
                             .into_iter()
                             .filter(|r| !seen.contains(&r.path))

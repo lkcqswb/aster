@@ -5,6 +5,7 @@ pub mod edits;
 pub mod instructions;
 pub mod lifecycle;
 pub mod live2d;
+pub mod project;
 pub mod session;
 pub mod tools;
 pub mod ui;

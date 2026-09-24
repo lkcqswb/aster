@@ -7,7 +7,7 @@ import tempfile
 import time
 import pexpect
 import pyte
-from terminal_helpers import screen_text, stop_child
+from terminal_helpers import InlineFrames, screen_text, stop_child
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,15 +31,11 @@ def main():
             def write_process_input(self, data):
                 child.send(data)
         screen=Screen(132,42);stream=pyte.Stream(screen)
-        saw_graphics=False
-        graphics_tail=""
+        output=InlineFrames(stream)
         def pump():
             try:
                 chunk=child.read_nonblocking(524288,timeout=.1)
-                nonlocal saw_graphics, graphics_tail
-                saw_graphics |= '\x1b]1337;File=inline=1' in graphics_tail+chunk
-                graphics_tail=chunk[-40:]
-                stream.feed(chunk)
+                output.feed(chunk)
             except pexpect.TIMEOUT: pass
             except pexpect.EOF: raise AssertionError('Terminal exited unexpectedly')
             return screen_text(screen)
@@ -49,7 +45,20 @@ def main():
                 if needle in pump(): return
             raise AssertionError(f'Missing screen text {needle!r}\n'+ screen_text(screen))
         def send(command,needle):
-            child.send(command+'\r');wait(needle)
+            def composer():
+                return next((line.split('›',1)[1] for line in screen_text(screen).splitlines()[-5:]
+                             if line.lstrip().startswith('›')), '')
+            child.send('\x1b[200~'+command+'\x1b[201~')
+            deadline=time.monotonic()+12
+            while time.monotonic()<deadline:
+                pump()
+                if command in composer():break
+            else:raise AssertionError('Composer did not receive '+command)
+            child.send('\r');wait(needle)
+            while time.monotonic()<deadline:
+                pump()
+                if command not in composer():break
+            else:raise AssertionError('Command was not submitted: '+command)
         def dismiss(needle,timeout=12):
             child.send('\x1b')
             deadline=time.monotonic()+timeout
@@ -73,7 +82,11 @@ def main():
             send('/sessions','Your conversations')
             wait('Jade terminal test')
             child.send('Jade terminal test');time.sleep(.2);pump()
-            child.send('\r');time.sleep(.2);wait('Jade terminal test')
+            child.send('\r');deadline=time.monotonic()+12
+            while time.monotonic()<deadline:
+                text=pump()
+                if 'Your conversations' not in text and 'Jade terminal test' in text:break
+            else:raise AssertionError('Session picker did not resume')
             send('/export','Saved ')
             assert list((state/'exports').glob('*.md'))
             send('/plan','Plan mode')
@@ -83,18 +96,18 @@ def main():
                 deadline=time.monotonic()+65
                 while time.monotonic()<deadline:
                     pump()
-                    if saw_graphics:break
+                    if output.frames:break
                 else: raise AssertionError('Live2D never emitted terminal graphics')
-            child.setwinsize(24,80);screen.resize(24,80);time.sleep(.4);wait('aster')
-            child.setwinsize(42,132);screen.resize(42,132);time.sleep(.3);wait('aster')
+            child.setwinsize(24,80);screen.resize(24,80);screen.reset();wait('和弄玉说说')
+            child.setwinsize(42,132);screen.resize(42,132);screen.reset();wait('和弄玉说说')
             child.send('/quit\r')
             deadline=time.monotonic()+12
             while time.monotonic()<deadline:
                 try:
-                    chunk=child.read_nonblocking(524288,timeout=.1);stream.feed(chunk)
+                    chunk=child.read_nonblocking(524288,timeout=.1);output.feed(chunk)
                 except pexpect.TIMEOUT: pass
                 except pexpect.EOF: break
-            else: raise AssertionError('Aster did not exit')
+            else: raise AssertionError('Aster did not exit\n'+screen_text(screen))
             child.close()
             assert child.exitstatus==0,(child.exitstatus,child.signalstatus,child.before[-3000:])
             sessions=[json.loads(p.read_text()) for p in state.glob('*.json')]

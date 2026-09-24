@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
-    fs,
     io::Read,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -18,9 +17,9 @@ pub fn schemas() -> Value {
      {"name":"update_plan","description":"Share or update a concise work plan for a multi-step task. One step may be doing. Marking a step done is a progress statement, never verification evidence.","input_schema":{"type":"object","properties":{"steps":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{"title":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","blocked"]}},"required":["title","status"],"additionalProperties":false}}},"required":["steps"],"additionalProperties":false}},
      {"name":"ask_user","description":"Ask one necessary, actionable question during work. Provide 2–5 short options when useful; the user may instead write an answer. Wait for the answer before dependent work. Do not use this for tool approvals.","input_schema":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","maxItems":5,"items":{"type":"string"}}},"required":["question","options"],"additionalProperties":false}},
      {"name":"read_skill","description":"Load an available skill or a supporting text file. Skills are listed by name in the system context. Read SKILL.md first; optional path is relative to the skill directory. Loading a skill grants no tool permissions.","input_schema":{"type":"object","properties":{"name":{"type":"string"},"path":{"type":"string"}},"required":["name"],"additionalProperties":false}},
-     {"name":"list_files","description":"List project files, excluding credentials and generated/private directories.","input_schema":{"type":"object","properties":{},"additionalProperties":false}},
-     {"name":"read_file","description":"Read a UTF-8 project file with line numbers. offset is a one-based line; limit is 1–500 lines (default 200). Use next_offset to continue. Nested AGENTS.md guidance is provided before access.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the project root."},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":500}},"required":["path"],"additionalProperties":false}},
-     {"name":"search","description":"Find a literal string in project text files. Bounded to 100 matching lines.","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},
+     {"name":"list_files","description":"List project files with ignore rules, private-path exclusions and pagination. path scopes a directory; glob matches paths relative to the project root. offset is zero-based; use next_offset to continue. Report incomplete_reason before claiming completeness.","input_schema":{"type":"object","properties":{"path":{"type":"string"},"glob":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":500}},"additionalProperties":false}},
+     {"name":"read_file","description":"Read up to 2 MB of UTF-8 source in bounded numbered pages. offset is a one-based line; limit is 1–500 lines (default 200). column is a one-based character position on the first line. Use both next_offset and next_column to continue, including long lines. Nested AGENTS.md guidance is provided before access.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the project root."},"offset":{"type":"integer","minimum":1},"column":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":500}},"required":["path"],"additionalProperties":false}},
+     {"name":"search","description":"Search project text with ignore rules. Defaults to literal, case-sensitive matching. path scopes a directory; glob matches project-relative paths. regex enables a bounded regular expression. context adds 0–3 lines around each matching line. offset counts matching lines from zero; use next_offset to continue. Inspect skipped_files and incomplete_reason before claiming exhaustive results.","input_schema":{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"regex":{"type":"boolean"},"case_sensitive":{"type":"boolean"},"context":{"type":"integer","minimum":0,"maximum":3},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["query"],"additionalProperties":false}},
      {"name":"write_file","description":"Create or replace a UTF-8 project file. Requires user permission in ask mode. Respect AGENTS.md.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Relative to the project root, such as src/main.rs. Never an absolute path."},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}},
      {"name":"edit_file","description":"Replace one exact, unique old_text occurrence in a UTF-8 project file. Read the file first, include enough context to match once, and preserve unrelated content. Shows a diff for approval and rejects stale edits.","input_schema":{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"],"additionalProperties":false}},
      {"name":"shell","description":"Run a shell command in the project with streamed output and a bounded timeout (default 30 seconds, maximum 120). Requires explicit permission in ask mode. It is NOT a filesystem sandbox.","input_schema":{"type":"object","properties":{"command":{"type":"string"},"timeout_secs":{"type":"integer","minimum":1,"maximum":120}},"required":["command"],"additionalProperties":false}},
@@ -28,6 +27,8 @@ pub fn schemas() -> Value {
     ])
 }
 pub fn sensitive(name: &str) -> bool {
+    let lowercase = name.to_ascii_lowercase();
+    let name = lowercase.as_str();
     name == ".env"
         || (name.starts_with(".env.") && name != ".env.example")
         || matches!(
@@ -79,39 +80,6 @@ pub fn path(root: &Path, name: &str) -> Result<PathBuf> {
     };
     Ok(out)
 }
-pub fn files(root: &Path) -> Result<Vec<String>> {
-    fn visit(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) -> Result<()> {
-        if depth > 6 || out.len() >= 800 {
-            return Ok(());
-        }
-        let mut entries = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            if out.len() >= 800 {
-                break;
-            }
-            let name = e.file_name().to_string_lossy().into_owned();
-            if sensitive(&name) {
-                continue;
-            }
-            let kind = e.file_type()?;
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                visit(root, &e.path(), depth + 1, out)?
-            } else if kind.is_file() {
-                out.push(e.path().strip_prefix(root)?.to_string_lossy().into_owned());
-            }
-        }
-        Ok(())
-    }
-    let mut out = vec![];
-    visit(root, root, 0, &mut out)?;
-    Ok(out)
-}
 fn string<'a>(a: &'a Value, k: &str) -> Result<&'a str> {
     a[k].as_str()
         .with_context(|| format!("{k} must be a string"))
@@ -144,11 +112,7 @@ pub fn clip(s: &str, n: usize) -> String {
     }
 }
 fn read(root: &Path, name: &str) -> Result<String> {
-    let p = path(root, name)?;
-    if fs::metadata(&p)?.len() > 128_000 {
-        bail!("File exceeds 128 KB")
-    };
-    Ok(fs::read_to_string(p)?)
+    crate::project::text(root, name)
 }
 pub fn validate(name: &str, a: &Value) -> Result<()> {
     let spec = schemas()
@@ -184,59 +148,9 @@ pub fn execute_with_progress(
     }
     validate(name, a)?;
     match name {
-        "list_files" => Ok(json!({"files":files(root)?,"limit":800})),
-        "read_file" => {
-            let offset = a
-                .get("offset")
-                .map(|v| v.as_u64().context("offset must be a positive integer"))
-                .transpose()?
-                .unwrap_or(1) as usize;
-            let limit = a
-                .get("limit")
-                .map(|v| v.as_u64().context("limit must be an integer"))
-                .transpose()?
-                .unwrap_or(200) as usize;
-            if offset == 0 || !(1..=500).contains(&limit) {
-                bail!("Use offset >= 1 and limit between 1 and 500");
-            }
-            let text = read(root, string(a, "path")?)?;
-            let lines: Vec<_> = text.lines().collect();
-            let selected: Vec<_> = lines
-                .iter()
-                .enumerate()
-                .skip(offset - 1)
-                .take(limit)
-                .collect();
-            let content = selected
-                .iter()
-                .map(|(i, t)| format!("{}: {t}", i + 1))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let end = (offset - 1).saturating_add(selected.len());
-            Ok(
-                json!({"path":string(a,"path")?,"content":content,"offset":offset,"total_lines":lines.len(),"next_offset":if end < lines.len(){Some(end+1)}else{None}}),
-            )
-        }
-        "search" => {
-            let q = string(a, "query")?;
-            if q.is_empty() || q.len() > 500 {
-                bail!("Search needs 1–500 bytes")
-            };
-            let mut matches = vec![];
-            for p in files(root)? {
-                if let Ok(text) = read(root, &p) {
-                    for (i, line) in text.lines().enumerate() {
-                        if line.contains(q) {
-                            matches.push(json!({"path":p,"line":i+1,"text":clip(line,300)}));
-                            if matches.len() >= 100 {
-                                return Ok(json!({"matches":matches,"truncated":true}));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(json!({"matches":matches}))
-        }
+        "list_files" => crate::project::list(root, a, cancel),
+        "read_file" => crate::project::read_page(root, a),
+        "search" => crate::project::search(root, a, cancel),
         "write_file" | "edit_file" => crate::edits::prepare(root, name, a)?.commit(root),
         "check_file" => {
             let kind = string(a, "kind")?;
@@ -458,6 +372,7 @@ fn shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[test]
     fn paginated_read_reports_continuation_and_bounds() {
         let d = tempfile::tempdir().unwrap();

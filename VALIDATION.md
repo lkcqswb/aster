@@ -1,3 +1,13 @@
+# Project navigation and larger sources 0.10 — 2026-09-24
+
+- **58 Rust tests passed**, covering root/nested ignore rules during scoped searches, exact list and matching-line pagination, regex/case/context controls, invalid ignore diagnostics, cancellation, binary/oversize skips, symlink/private-path exclusions, case-insensitive credential names and focused large-file edits. Formatting, Clippy with warnings denied and release build passed.
+- A 180 KB Unicode line was reconstructed across numbered read pages without losing a character. A focused edit in a larger source preserved all unrelated bytes; whole-file replacement and a stale second commit were rejected.
+- One live MiniMax task found the target at line **8,001** in a **352,068-byte** catalog, read at most five nearby lines, made the approved exact edit and checked the full changed record. A separate full-file comparison and SHA-256 comparison proved every unrelated byte stayed unchanged. Session `24d6dce7ebb3`: **7 provider requests, 9 tools, 13,099 input tokens, 1,132 output tokens**, exit 0. Evidence: `.aster/qa/project-live.json`. No provider retry or shell command was used.
+- The context/skills terminal regression and general session/approval/fork/export/resize regression passed. The general driver's command submission now waits for the composer to receive and submit the command, and session switching waits for the picker to close. This fixes races that previously consumed the beginning of the next command; those earlier attempts are not passing results.
+- Navigation reports skipped/incomplete work and obeys explicit size/time/entry limits. Pagination is a fresh scan, not a frozen filesystem snapshot. The work card records actual discovered paths and counts.
+
+---
+
 # Evidence and companion review 0.9 — 2026-09-24
 
 - **50 Rust tests passed**, plus formatting, Clippy with warnings denied and release build. New cases cover failed-then-passing exact checks, weaker assertions that cannot erase a failure, stale passes after edits, later regressions, old session records, and valid provider pairs for manual checks.

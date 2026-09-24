@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -16,10 +16,17 @@ pub struct PreparedEdit {
 fn contents(path: &Path) -> Result<Option<String>> {
     match fs::metadata(path) {
         Ok(meta) => {
-            if !meta.is_file() || meta.len() > 128_000 {
-                bail!("Edit requires a UTF-8 file of at most 128 KB");
+            if !meta.is_file() || meta.len() > crate::project::MAX_SOURCE as u64 {
+                bail!("Edit requires a UTF-8 file of at most 2 MB");
             }
-            Ok(Some(fs::read_to_string(path)?))
+            let mut content = String::new();
+            fs::File::open(path)?
+                .take((crate::project::MAX_SOURCE + 1) as u64)
+                .read_to_string(&mut content)?;
+            if content.len() > crate::project::MAX_SOURCE || content.contains('\0') {
+                bail!("Edit requires a UTF-8 text file of at most 2 MB");
+            }
+            Ok(Some(content))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -30,13 +37,22 @@ pub fn prepare(root: &Path, tool: &str, args: &Value) -> Result<PreparedEdit> {
     let path = crate::tools::path(root, relative)?;
     let before = contents(&path)?;
     let after = match tool {
-        "write_file" => args["content"]
-            .as_str()
-            .context("content must be text")?
-            .to_string(),
+        "write_file" => {
+            if before.as_ref().is_some_and(|text| text.len() > 128_000) {
+                bail!("Use a focused edit_file change for an existing file larger than 128 KB");
+            }
+            let content = args["content"].as_str().context("content must be text")?;
+            if content.len() > 128_000 {
+                bail!("Write exceeds 128 KB");
+            }
+            content.to_string()
+        }
         "edit_file" => {
             let old = args["old_text"].as_str().context("old_text must be text")?;
             let new = args["new_text"].as_str().context("new_text must be text")?;
+            if old.len() > 128_000 || new.len() > 128_000 {
+                bail!("Use edit fragments of at most 128 KB");
+            }
             if old.is_empty() {
                 bail!("old_text must be nonempty; use write_file to create a file");
             }
@@ -51,8 +67,8 @@ pub fn prepare(root: &Path, tool: &str, args: &Value) -> Result<PreparedEdit> {
         }
         _ => bail!("Not a file editing tool"),
     };
-    if after.len() > 128_000 {
-        bail!("Write exceeds 128 KB");
+    if after.len() > crate::project::MAX_SOURCE {
+        bail!("Edited file exceeds 2 MB");
     }
     let diff = diff(relative, before.as_deref().unwrap_or(""), &after);
     Ok(PreparedEdit {
@@ -140,6 +156,38 @@ pub fn diff(name: &str, before: &str, after: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_source_allows_only_a_focused_edit_and_rejects_a_stale_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = format!(
+            "{}target = bad\n{}",
+            "// unchanged\n".repeat(10_000),
+            "// tail\n".repeat(10_000)
+        );
+        let path = dir.path().join("large.rs");
+        fs::write(&path, &original).unwrap();
+        assert!(
+            prepare(
+                dir.path(),
+                "write_file",
+                &json!({"path":"large.rs","content":"replacement"})
+            )
+            .is_err()
+        );
+        let edit = prepare(
+            dir.path(),
+            "edit_file",
+            &json!({"path":"large.rs","old_text":"target = bad","new_text":"target = good"}),
+        )
+        .unwrap();
+        assert!(edit.diff.len() < 300);
+        edit.commit(dir.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original.replace("target = bad", "target = good")
+        );
+        assert!(edit.commit(dir.path()).is_err());
+    }
     #[test]
     fn exact_edit_preserves_surrounding_content_and_rejects_stale_approval() {
         let dir = tempfile::tempdir().unwrap();

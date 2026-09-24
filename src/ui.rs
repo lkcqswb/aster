@@ -1674,6 +1674,8 @@ impl App {
                     format!("{} attached files · /context", work.context_files.len()),
                     DIM,
                 ));
+            } else if !work.discovery.is_empty() {
+                lines.push(line(work.discovery.lines().next().unwrap_or(""), DIM));
             } else {
                 lines.push(line("", DIM));
             }

@@ -118,6 +118,11 @@ fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
         "Instructions, used skills and attached references.",
     );
     add(
+        Action::Command("/checkpoint"),
+        "Review our context checkpoint",
+        "Inspect retained history and restore full context.",
+    );
+    add(
         Action::Command("/skills"),
         "Choose a skill",
         "Inspect resources and prepare an explicit request.",

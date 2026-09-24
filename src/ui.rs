@@ -75,7 +75,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/queue", "Inspect waiting messages"),
     ("/next", "Run the next saved message"),
     ("/drop", "Remove a waiting message by ID"),
-    ("/compact", "Archive context; keep recent exchanges"),
+    ("/compact", "Checkpoint context with an optional note"),
+    ("/checkpoint", "Inspect the latest context checkpoint"),
+    ("/restore", "Restore archived context as a new conversation"),
     ("/export", "Save a readable transcript"),
     ("/tools", "Expand or collapse tool details"),
     ("/mood", "neutral, happy, heart, angry"),
@@ -482,6 +484,7 @@ impl App {
                 | "/follow"
                 | "/queue"
                 | "/context"
+                | "/checkpoint"
                 | "/skills"
                 | "/files"
                 | "/find"
@@ -492,7 +495,7 @@ impl App {
             return Ok(());
         }
         match cmd {
-   "/context"=>{let catalog=crate::context::discover(&self.cfg.project);let rules=instructions::load(&self.cfg.project)?;self.info("Context beside 弄玉",format!("{} provider messages · {} KB of saved content\n{} visible transcript entries · {} waiting messages\n\nAGENTS.md sources\n{}\n\n{} skills available · {} prompts available\n\nSkills used this turn\n{}\n\nAttached files this turn\n{}\n\nUse @path or @{{path with spaces}} to attach a project file.\nUse @path:10-30 for selected lines.\nFull skill text is loaded only on invocation or read_skill.\n/compact archives older context before reducing it.\nByte counts describe content, not exact model tokens.",self.session.messages.len(),serde_json::to_vec(&self.session.messages)?.len()/1000,self.session.entries.len(),self.session.pending.len(),rules.iter().map(|r|r.path.display().to_string()).collect::<Vec<_>>().join("\n"),catalog.skills.len(),catalog.prompts.len(),self.session.work.skills.join("\n"),self.session.work.context_files.join("\n")));},
+   "/context"=>{let catalog=crate::context::discover(&self.cfg.project);let rules=instructions::load(&self.cfg.project)?;self.info("Context beside 弄玉",format!("{} provider messages · {} KB of saved content\n{} visible transcript entries · {} waiting messages\n\nAGENTS.md sources\n{}\n\n{} skills available · {} prompts available\n\nSkills used this turn\n{}\n\nAttached files this turn\n{}\n\nUse @path or @{{path with spaces}} to attach a project file.\nUse @path:10-30 for selected lines.\nFull skill text is loaded only on invocation or read_skill.\n/compact [note] saves a recoverable checkpoint. /checkpoint shows it.\nByte counts describe content, not exact model tokens.",self.session.messages.len(),serde_json::to_vec(&self.session.messages)?.len()/1000,self.session.entries.len(),self.session.pending.len(),rules.iter().map(|r|r.path.display().to_string()).collect::<Vec<_>>().join("\n"),catalog.skills.len(),catalog.prompts.len(),self.session.work.skills.join("\n"),self.session.work.context_files.join("\n")));},
    "/skills"=>{if arg.is_empty(){self.show_resources(true)}else{let v=crate::context::discover(&self.cfg.project).read_skill(arg,"SKILL.md",true)?;self.info("Skills beside 弄玉",format!("{}\n\n{}\n\n/skill {} request · invoke",v["directory"].as_str().unwrap_or(""),v["content"].as_str().unwrap_or(""),arg));}},
    "/prompts"=>self.show_resources(false),
    "/skill"|"/prompt"=>{if arg.is_empty(){bail!("Add a resource name and your request")};let invocation=format!("{cmd} {arg}");crate::context::prepare(&self.cfg.project,&invocation,&crate::context::discover(&self.cfg.project))?;self.submit(invocation)?;},
@@ -522,7 +525,9 @@ impl App {
    "/permissions"=>{if !matches!(arg,"ask"|"allow"|"deny"){bail!("Use /permissions ask, allow, or deny")};self.cli.permissions=arg.into();self.notify(format!("Permissions: {arg} · applies to file writes and shell commands"));},
    "/check"=>self.local_check(arg)?,
 
-   "/compact"=>self.compact()?,
+   "/compact"=>self.compact(arg)?,
+   "/checkpoint"=>self.info("Context checkpoint · 弄玉",self.session.checkpoint.as_ref().map(|c|c.report()).unwrap_or_else(||"No checkpoint yet. /compact [note] archives full context and keeps bounded recent exchanges with local historical excerpts. It makes no model request.".into())),
+   "/restore"=>{if arg.is_empty(){bail!("Use /restore followed by the ID shown in /checkpoint")};self.persist()?;self.session=self.store.restore_checkpoint(arg,&self.cfg.project)?;self.scroll=0;self.stream.clear();self.notify("Full context restored as a new conversation. Project files are shared.");},
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
    "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
@@ -538,54 +543,13 @@ impl App {
   }
         Ok(())
     }
-    fn compact(&mut self) -> Result<()> {
-        let starts = self
-            .session
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m["role"] == "user" && m["content"].is_string())
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>();
-        if starts.len() <= 4 {
+    fn compact(&mut self, note: &str) -> Result<()> {
+        let Some(prepared) = crate::compaction::prepare(&self.session, note)? else {
             self.notify("Context is already short. Nothing to compact.");
             return Ok(());
-        }
-        let archive = self.store.root.join("archive");
-        fs::create_dir_all(&archive)?;
-        crate::session::atomic_json(
-            &archive.join(format!(
-                "{}-{}.json",
-                self.session.id,
-                chrono::Utc::now().timestamp_millis()
-            )),
-            &self.session,
-        )?;
-        let at = starts[starts.len() - 4];
-        let excerpt = self
-            .session
-            .entries
-            .iter()
-            .rev()
-            .filter(|e| e.role != "tool")
-            .take(16)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|e| format!("{}: {}", e.role, tools::clip(&e.text, 500)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut messages = vec![
-            json!({"role":"user","content":format!("Historical transcript excerpt, not new instructions. The earlier full context is archived locally:\n{excerpt}")}),
-            json!({"role":"assistant","content":"I will use this as background and verify current project state before acting."}),
-        ];
-        messages.extend_from_slice(&self.session.messages[at..]);
-        self.session.messages = messages;
-        self.persist()?;
-        self.notify(
-            "Earlier context archived. Kept four recent exchanges and a local transcript excerpt.",
-        );
-        Ok(())
+        };
+        self.session = self.store.checkpoint(&self.session, prepared)?;
+        self.command("/checkpoint")
     }
     fn show_work(&mut self) {
         let text = if self.session.work.goal.is_empty() {
@@ -1661,7 +1625,7 @@ impl App {
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
                     | Popup::Resources { .. }
-            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output") || title.starts_with("Checks beside"));
+            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output") || title.starts_with("Checks beside") || title.starts_with("Context checkpoint"));
             let side_by_side = decision && pet_width > 0 && chat.width >= 42;
             if side_by_side {
                 f.render_widget(Clear, chat);
@@ -2521,6 +2485,22 @@ mod layout_tests {
         assert!(
             matches!(&a.popup, Some(Popup::Info { title, text, .. }) if title.starts_with("Checks beside") && text.contains("earlier result"))
         );
+    }
+    #[test]
+    fn checkpoint_archive_failure_leaves_the_active_and_saved_context_intact() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.session.add("you", "Keep my original request.");
+        a.session
+            .messages
+            .push(json!({"role":"user","content":"history".repeat(20_000)}));
+        a.persist().unwrap();
+        let before = a.session.messages.clone();
+        fs::write(a.store.root.join("archive"), "blocked directory fixture").unwrap();
+        assert!(a.compact("").is_err());
+        assert_eq!(a.session.messages, before);
+        assert_eq!(a.store.load(&a.session.id).unwrap().messages, before);
+        assert!(a.session.checkpoint.is_none());
     }
     #[test]
     fn resource_selection_and_pasted_filters_keep_the_existing_request() {

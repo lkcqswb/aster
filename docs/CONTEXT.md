@@ -76,4 +76,10 @@ Review $ARGUMENTS. Report concrete bugs with evidence. Do not edit files.
 
 ## Context size and compaction
 
-An expanded user message is limited to 80 KB. Before sending a model request, Aster rejects saved messages plus system context above 400 KB. Use `/context` to inspect, then `/compact` or `/new` to reduce context. Compaction archives the previous conversation privately before retaining recent exchanges and a local excerpt. It does not roll back project files or produce a model-authored summary.
+An expanded user message is limited to 80 KB. Before sending a model request, Aster rejects saved messages plus system context above 400 KB. Use `/context` to inspect, then `/compact` or `/new` to reduce context. `/compact [note]` first archives the complete session privately, including original provider blocks. It retains up to four recent exchanges within 64 KB, never separating a tool call from its result or changing a retained thinking signature. A single oversized or incomplete exchange can be archived in full instead. The resulting provider context is bounded to 128 KB.
+
+The local checkpoint includes excerpts of the original request, recent user requests, the latest recorded task state, and cumulative file-tool read/write paths (at most 128 of each). Assistant excerpts are marked as claims. The optional note is at most 2 KB and carries forward on later compactions; a new note replaces it. The checkpoint is an extract of recorded history, not a model-authored summary, and excerpts may be truncated. It makes no API request.
+
+`/checkpoint` opens the retained history beside 弄玉 and shows the before/after byte counts plus archive ID. `/restore ID` opens the exact archived provider context as a new conversation. It preserves the compacted conversation, clears copied follow-up queues and never rolls back project files. An oversized restored context may need another compaction before sending a model request. Older sessions load without checkpoint metadata.
+
+Private archives live under the session store's `archive/` directory. They contain full provider content and are excluded from the repository. A failed archive/save leaves the active in-memory conversation intact.

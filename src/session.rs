@@ -67,6 +67,8 @@ pub struct Session {
     pub work: crate::work::Work,
     #[serde(default)]
     pub pending: Vec<PendingMessage>,
+    #[serde(default)]
+    pub checkpoint: Option<crate::compaction::Checkpoint>,
 }
 impl Session {
     pub fn new(project: PathBuf, model: String, demo: bool) -> Self {
@@ -91,6 +93,7 @@ impl Session {
             parent: None,
             work: Default::default(),
             pending: vec![],
+            checkpoint: None,
         }
     }
     pub fn add(&mut self, role: &str, text: impl Into<String>) {
@@ -146,6 +149,48 @@ impl Store {
     }
     pub fn save(&self, s: &Session) -> Result<()> {
         atomic_json(&self.path(&s.id)?, s)
+    }
+    pub fn checkpoint(
+        &self,
+        session: &Session,
+        prepared: crate::compaction::Prepared,
+    ) -> Result<Session> {
+        let archive = self.root.join("archive");
+        fs::create_dir_all(&archive)?;
+        // Archive first; a failed save never replaces the active conversation in memory.
+        atomic_json(&archive.join(&prepared.checkpoint.archive), session)?;
+        let mut compacted = session.clone();
+        compacted.messages = prepared.messages;
+        compacted.checkpoint = Some(prepared.checkpoint);
+        compacted.add("notice", "Created a local context checkpoint. The full provider context is archived; project files were not changed.");
+        self.save(&compacted)?;
+        Ok(compacted)
+    }
+    pub fn restore_checkpoint(&self, id: &str, project: &Path) -> Result<Session> {
+        self.path(id)?;
+        let archive = self.root.join("archive");
+        let suffix = format!("-{id}.json");
+        let path = fs::read_dir(&archive)
+            .context("No context archives yet")?
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.len() == 30
+                    && name.ends_with(&suffix)
+                    && e.file_type().is_ok_and(|t| t.is_file())
+            })
+            .context("No archive with that checkpoint ID")?
+            .path();
+        let archived: Session = serde_json::from_slice(&fs::read(path)?)?;
+        if archived.project != project {
+            bail!("That checkpoint belongs to a different project");
+        }
+        let mut restored = archived.fork();
+        restored.title = format!("{} · restored context", archived.title);
+        restored.add("notice", format!("Restored full context from checkpoint {id} as a new conversation. Project files are shared; no filesystem rollback occurred."));
+        self.save(&restored)?;
+        Ok(restored)
     }
     pub fn load(&self, id: &str) -> Result<Session> {
         Ok(serde_json::from_slice(&fs::read(self.path(id)?)?)?)
@@ -216,9 +261,57 @@ mod tests {
         let mut old = serde_json::to_value(&s).unwrap();
         old.as_object_mut().unwrap().remove("pending");
         old.as_object_mut().unwrap().remove("work");
+        old.as_object_mut().unwrap().remove("checkpoint");
         let restored: Session = serde_json::from_value(old).unwrap();
         assert!(restored.pending.is_empty());
         assert!(restored.work.goal.is_empty());
+        assert!(restored.checkpoint.is_none());
+    }
+    #[test]
+    fn checkpoint_restores_exact_provider_context_as_a_fork_and_keeps_files() {
+        let d = tempfile::tempdir().unwrap();
+        let st = Store::open(&d.path().join("state")).unwrap();
+        let mut original = Session::new(d.path().into(), "test".into(), true);
+        original.add("you", "Keep the original request.");
+        original
+            .messages
+            .push(serde_json::json!({"role":"user","content":"context".repeat(20_000)}));
+        original
+            .pending
+            .push(PendingMessage::new("later".into(), Delivery::FollowUp));
+        fs::write(d.path().join("work.txt"), "newer project state").unwrap();
+        let prepared = crate::compaction::prepare(&original, "Preserve this note.")
+            .unwrap()
+            .unwrap();
+        let compacted = st.checkpoint(&original, prepared).unwrap();
+        let checkpoint = compacted.checkpoint.as_ref().unwrap();
+        let restored = st.restore_checkpoint(&checkpoint.id, d.path()).unwrap();
+        assert_eq!(restored.messages, original.messages);
+        assert_eq!(restored.parent, Some(original.id.clone()));
+        assert_ne!(restored.id, original.id);
+        assert!(restored.pending.is_empty());
+        assert_eq!(st.load(&original.id).unwrap().messages, compacted.messages);
+        assert_eq!(
+            fs::read_to_string(d.path().join("work.txt")).unwrap(),
+            "newer project state"
+        );
+        assert!(
+            st.restore_checkpoint(&checkpoint.id, Path::new("/another-project"))
+                .is_err()
+        );
+        assert!(st.restore_checkpoint("../../unsafe", d.path()).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(st.root.join("archive").join(&checkpoint.archive))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
     #[test]
     fn persist_fork_export_and_lock() {

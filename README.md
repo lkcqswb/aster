@@ -87,7 +87,9 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/sessions`, `/resume ID` | Find and continue a project session |
 | `/rename TITLE` | Rename the current conversation |
 | `/fork [title]` | Branch its model context and transcript |
-| `/compact` | Archive full context; retain four recent exchanges and a local excerpt |
+| `/compact [note]` | Archive full context; keep bounded recent exchanges and task excerpts |
+| `/checkpoint` | Inspect retained context, byte counts and the restore ID |
+| `/restore ID` | Restore archived provider context as a new conversation; files stay shared |
 | `/export` | Export a readable Markdown transcript |
 | `/delete` | Confirm removal of the current saved conversation |
 | `/context` | Inspect model context, loaded skills and attached files |

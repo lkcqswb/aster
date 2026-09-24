@@ -259,10 +259,9 @@ fn turn_with_input(
                         "MiniMax key is missing. Configure ANTHROPIC_AUTH_TOKEN in Aster's private .env."
                     )
                 }
-                s.work.model_requests += 1;
                 request(
                     cfg,
-                    &s,
+                    &mut s,
                     &system,
                     output_left.min(2048),
                     remaining.min(90),
@@ -572,7 +571,7 @@ fn turn_with_input(
 }
 fn request(
     cfg: &Config,
-    session: &Session,
+    session: &mut Session,
     system: &str,
     max_tokens: u64,
     seconds: u64,
@@ -598,6 +597,7 @@ fn request(
             "/v1/messages"
         }
     );
+    session.work.model_requests += 1;
     let response=client.post(url).bearer_auth(&cfg.key).header("anthropic-version","2023-06-01").header("User-Agent",concat!("aster/",env!("CARGO_PKG_VERSION")))
   .json(&json!({"model":session.model,"system":system,"messages":session.messages,"tools":tools::schemas(),"max_tokens":max_tokens,"stream":true})).send()
   .map_err(|_|anyhow::anyhow!("MiniMax request failed or timed out. No automatic retry was made."))?;
@@ -964,6 +964,28 @@ mod integration_tests {
             chrome: root.join("chrome"),
             texture_size: 2048,
         }
+    }
+    #[test]
+    fn context_preflight_rejection_is_not_counted_as_a_model_request() {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = config(d.path());
+        cfg.base = "http://127.0.0.1:0".into();
+        let mut s = Session::new(cfg.project.clone(), cfg.model.clone(), false);
+        s.messages
+            .push(json!({"role":"user","content":"x".repeat(400_001)}));
+        let (tx, _) = crossbeam_channel::unbounded();
+        let error = request(
+            &cfg,
+            &mut s,
+            "",
+            10,
+            1,
+            &Arc::new(AtomicBool::new(false)),
+            &tx,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("No request was sent"));
+        assert_eq!(s.work.model_requests, 0);
     }
     #[test]
     fn steering_skips_stale_actions_and_preserves_tool_result_pairs() {

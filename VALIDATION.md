@@ -1,3 +1,10 @@
+# Recoverable context checkpoints 0.14 — 2026-09-24
+
+- **75 Rust tests passed**; formatting, strict Clippy and release build passed. Coverage includes oversized single exchanges, exact retained tool/thinking blocks, repeated checkpoints, incomplete tool batches, failed writes, archive failure, cross-project restore rejection, private archive permissions and context preflight request counts.
+- Animated terminal: **600,667 → 1,270 bytes**, 11 distinct frames, exact provider-context archive/restore, separate restored conversation, unchanged newer file state, zero API requests, exit 0. The fixture's initial macOS `/var` alias was corrected to the canonical project path before the successful run. Evidence: `.aster/qa/checkpoint-e2e.json`.
+- **Live MiniMax-M2.7 continuation** from the compacted fixture recovered the original JSON contract without restating it in the new prompt, reread `proof.txt`, requested one reviewed file-write approval and passed `check_file json_equals`. An external JSON comparison matched `{"proof":"checkpoint-486","verified":true}` and the source stayed unchanged. **4 requests, 5,095 input / 327 output tokens**, no retry, exit 0. Session `c0ffee123456` in private `checkpoint-live-sessions-3f7ba808`; evidence `.aster/qa/checkpoint-live.json`. This proves the bounded fixture continuation, not lossless semantic summarization of arbitrary conversations.
+- General terminal regression passed. Checkpoints contain local excerpts with explicit limits, not a model-written summary. Restoring provider context does not roll back project files.
+
 # Companion actions 0.13 — 2026-09-24
 
 - **68 Rust tests passed**, formatting, strict Clippy and release build passed. Coverage includes live menu availability, mouse hit targets, preserved decisions, pasted filters, skill selection retaining the existing request and compact layouts.

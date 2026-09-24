@@ -6,6 +6,7 @@ The companion should help you make decisions and follow real work. Animation alo
 
 - [Pi agent runtime](https://github.com/earendil-works/pi/tree/main/packages/agent): typed lifecycle events, steering at tool boundaries, follow-up messages.
 - [Pi extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md): tools, commands, questions, persistent state, event interception and custom terminal UI.
+- [Pi compaction](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/compaction.md): bounded retained history, intact tool/result pairs, cumulative file tracking and recoverable context. Aster uses local excerpts here, with no summarization request.
 - [Pi sessions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md): resumable conversation context and branching.
 
 These inform Aster's Rust implementation; Pi is not embedded or required at runtime.
@@ -64,4 +65,8 @@ Plans, diffs, command output, checks and files remain available while a decision
 
 Clicking the companion or pressing F1 opens searchable local actions. Command output and checks needing attention appear early; pending decisions can be resumed, inspected, redirected or stopped. Mouse selection and the scroll wheel work in the local views. The menu refreshes as work finishes so obsolete stop/redirect actions disappear. Opening controls preserves the composer and makes no model request. Choosing a skill or prompt prepends its invocation to the existing draft. Session and resource filters accept pasted text.
 
-Next: strengthen long-running conversation management and recovery.
+## Delivered in 0.14
+
+Recoverable local context checkpoints with a byte budget, complete tool/result boundaries, user notes, original-request excerpts and cumulative file-tool history. A single oversized exchange can now be compacted. Restore creates a new conversation with exact archived provider blocks and leaves files untouched. The companion action menu exposes the checkpoint; model-request counts exclude a locally rejected oversized request. A real MiniMax continuation recovered the saved contract, reread current source, wrote with approval and passed an exact JSON check.
+
+Next: improve navigation through conversation history and explicit recovery.

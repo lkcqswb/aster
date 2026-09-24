@@ -130,6 +130,48 @@ pub fn text(root: &Path, name: &str) -> Result<String> {
 }
 
 pub fn read_page(root: &Path, args: &Value) -> Result<Value> {
+    page(root, args, PAGE_BYTES, PAGE_JSON)
+}
+const PAGE_JSON: usize = 24_000;
+const BATCH_BYTES: usize = 64_000;
+const BATCH_JSON: usize = 96_000;
+/// Read up to eight pages, sharing one output budget. A failed file does not fail the batch.
+pub fn read_files(root: &Path, args: &Value) -> Result<Value> {
+    let files = args["files"].as_array().context("files must be an array")?;
+    if files.is_empty() || files.len() > 8 {
+        bail!("files needs 1–8 items");
+    }
+    let (mut bytes_left, mut json_left) = (BATCH_BYTES, BATCH_JSON);
+    let mut pages = Vec::new();
+    let mut incomplete = false;
+    for entry in files {
+        let name = entry["path"].as_str().unwrap_or("");
+        if bytes_left < 512 || json_left < 768 {
+            incomplete = true;
+            pages.push(json!({"path":name,"skipped":true,"reason":"The 64 KB batch limit was reached before this file. Read it in another call.","next_offset":entry.get("offset").cloned().unwrap_or(json!(1)),"next_column":entry.get("column").cloned().unwrap_or(json!(1))}));
+            continue;
+        }
+        match page(
+            root,
+            entry,
+            bytes_left.min(PAGE_BYTES),
+            json_left.min(PAGE_JSON),
+        ) {
+            Ok(result) => {
+                let content = result["content"].as_str().unwrap_or("");
+                bytes_left -= content.len().min(bytes_left);
+                json_left -= serde_json::to_string(content)?.len().min(json_left);
+                incomplete |= !result["next_offset"].is_null();
+                pages.push(result);
+            }
+            Err(e) => pages.push(json!({"path":name,"error":e.to_string()})),
+        }
+    }
+    Ok(
+        json!({"files":pages,"content_bytes":BATCH_BYTES-bytes_left,"truncated":incomplete,"errors":pages.iter().filter(|p|p.get("error").is_some()).count()}),
+    )
+}
+fn page(root: &Path, args: &Value, page_bytes: usize, json_bytes: usize) -> Result<Value> {
     let name = args["path"].as_str().context("path must be text")?;
     let offset = number(args, "offset", 1, 1, MAX_SOURCE + 1)?;
     let column = number(args, "column", 1, 1, MAX_SOURCE + 1)?;
@@ -154,9 +196,9 @@ pub fn read_page(root: &Path, args: &Value) -> Result<Value> {
             format!("{} [column {start_column}]: ", index + 1)
         };
         let separator = usize::from(!content.is_empty());
-        let remaining = PAGE_BYTES.saturating_sub(content.len() + prefix.len() + separator);
+        let remaining = page_bytes.saturating_sub(content.len() + prefix.len() + separator);
         let prefix_cost = prefix.chars().map(escaped_size).sum::<usize>() + separator * 2;
-        let json_remaining = 24_000usize.saturating_sub(serialized_bytes + prefix_cost);
+        let json_remaining = json_bytes.saturating_sub(serialized_bytes + prefix_cost);
         if remaining < 4 || json_remaining < 6 {
             next = Some((index + 1, start_column));
             break;
@@ -500,6 +542,82 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn batch_reads_report_each_file_and_share_one_output_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "first\nsecond\nthird\n").unwrap();
+        fs::write(root.join("b.txt"), "only\n").unwrap();
+        fs::write(root.join(".env"), "SECRET=1").unwrap();
+        fs::write(root.join("bin.dat"), b"\0\x01").unwrap();
+        let result = read_files(
+            root,
+            &json!({"files":[{"path":"a.txt","offset":2,"limit":1},{"path":".env"},{"path":"missing.txt"},{"path":"../x"},{"path":"bin.dat"},{"path":"b.txt"}]}),
+        )
+        .unwrap();
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 6);
+        assert_eq!(files[0]["content"], "2: second");
+        assert_eq!(files[0]["next_offset"], 3);
+        assert_eq!(files[0]["next_column"], 1);
+        assert!(files[1]["error"].as_str().unwrap().contains("private"));
+        assert!(files[2]["error"].is_string());
+        assert!(
+            files[3]["error"]
+                .as_str()
+                .unwrap()
+                .contains("remain in the project")
+        );
+        assert!(files[4]["error"].as_str().unwrap().contains("Binary"));
+        assert_eq!(files[5]["content"], "1: only");
+        assert!(files[5]["next_offset"].is_null());
+        assert_eq!(result["errors"], 4);
+        assert_eq!(result["truncated"], true);
+
+        let line = "x".repeat(99);
+        let body = format!("{line}\n").repeat(400);
+        for name in ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"] {
+            fs::write(root.join(name), &body).unwrap();
+        }
+        let entries = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]
+            .iter()
+            .map(|p| json!({"path":p,"limit":500}))
+            .collect::<Vec<_>>();
+        let args = json!({ "files": entries });
+        let batch = read_files(root, &args).unwrap();
+        let files = batch["files"].as_array().unwrap();
+        let total: usize = files
+            .iter()
+            .map(|f| f["content"].as_str().map_or(0, str::len))
+            .sum();
+        assert!(total <= BATCH_BYTES, "{total}");
+        assert!(batch["content_bytes"].as_u64().unwrap() as usize == total);
+        assert!(
+            files
+                .iter()
+                .all(|f| f["content"].as_str().map_or(0, str::len) <= PAGE_BYTES)
+        );
+        assert!(files[0]["next_offset"].as_u64().unwrap() > 1);
+        assert_eq!(files[7]["skipped"], true);
+        assert_eq!(files[7]["next_offset"], 1);
+        assert!(serde_json::to_string(&batch).unwrap().len() < 200_000);
+        let continued = read_files(
+            root,
+            &json!({"files":[{"path":"c1","offset":files[0]["next_offset"],"column":files[0]["next_column"]}]}),
+        )
+        .unwrap();
+        let prefix = match files[0]["next_column"].as_u64().unwrap() {
+            1 => format!("{}: ", files[0]["next_offset"]),
+            column => format!("{} [column {column}]: ", files[0]["next_offset"]),
+        };
+        assert!(
+            continued["files"][0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with(&prefix)
+        );
+        assert!(read_files(root, &json!({"files":[]})).is_err());
     }
     #[test]
     fn escaped_text_pages_leave_room_for_valid_continuation_metadata() {

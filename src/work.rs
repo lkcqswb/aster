@@ -90,12 +90,20 @@ impl Work {
         Ok(())
     }
     pub fn record(&mut self, name: &str, args: &Value, result: &Value, error: bool) {
-        let subject = args["path"]
-            .as_str()
-            .or(args["command"].as_str())
-            .unwrap_or(name);
-        if args["path"].is_string() || args["command"].is_string() {
-            self.focus = crate::tools::clip(subject, 240);
+        let named = crate::tools::subject(name, args);
+        let subject = named.as_deref().unwrap_or(name);
+        if let Some(named) = &named {
+            self.focus = crate::tools::clip(named, 240);
+        }
+        if name == "web_fetch" {
+            self.focus = format!("Web · {}", crate::tools::clip(subject, 234));
+            if !error {
+                self.discovery = format!(
+                    "Web page read · HTTP {} · untrusted content\n{}",
+                    result["status"],
+                    crate::tools::clip(result["final_url"].as_str().unwrap_or(subject), 300)
+                );
+            }
         }
         self.waiting.clear();
         if name == "search"
@@ -148,10 +156,23 @@ impl Work {
             }
             self.focus = format!("Skill · {skill}");
         }
-        if result["written"] == true {
+        let changed = if name == "move_file" && result["moved"] == true {
+            [&args["from"], &args["to"]]
+                .into_iter()
+                .filter_map(Value::as_str)
+                .collect()
+        } else if (name == "delete_file" && result["deleted"] == true) || result["written"] == true
+        {
+            vec![args["path"].as_str().unwrap_or(subject)]
+        } else {
+            vec![]
+        };
+        if !changed.is_empty() {
             self.revision = self.revision.saturating_add(1);
-            if !self.changed.iter().any(|p| p == subject) {
-                self.changed.push(subject.into());
+            for path in changed {
+                if !self.changed.iter().any(|p| p == path) {
+                    self.changed.push(path.into());
+                }
             }
             if let Some(diff) = result["diff"].as_str() {
                 self.diffs
@@ -473,6 +494,63 @@ mod tests {
         );
         assert!(work.verified());
         assert_eq!(work.evidence_state(0), EvidenceState::Earlier);
+    }
+    #[test]
+    fn moves_deletes_and_multi_edits_are_changes_that_stale_earlier_checks() {
+        let mut work = Work::begin("reorganize");
+        let check = json!({"command":"cargo test"});
+        for (name, args, result) in [
+            (
+                "multi_edit",
+                json!({"path":"src/lib.rs","edits":[]}),
+                json!({"written":true,"diff":"--- a/src/lib.rs"}),
+            ),
+            (
+                "move_file",
+                json!({"from":"src/old.rs","to":"src/new.rs"}),
+                json!({"moved":true,"diff":"rename from src/old.rs"}),
+            ),
+            (
+                "delete_file",
+                json!({"path":"notes.txt"}),
+                json!({"deleted":true,"diff":"+++ /dev/null"}),
+            ),
+        ] {
+            work.record("shell", &check, &json!({"passed":true}), false);
+            let revision = work.revision;
+            work.record(name, &args, &result, false);
+            assert_eq!(work.revision, revision + 1, "{name}");
+            assert_eq!(
+                work.verdict(),
+                "Checks need rerunning after edits",
+                "{name}"
+            );
+        }
+        assert_eq!(
+            work.changed,
+            ["src/lib.rs", "src/old.rs", "src/new.rs", "notes.txt"]
+        );
+        assert_eq!(work.diffs.len(), 3);
+        assert_eq!(work.diffs[1].0, "src/old.rs → src/new.rs");
+        assert_eq!(work.focus, "notes.txt");
+        work.record(
+            "move_file",
+            &json!({"from":"a","to":"b"}),
+            &json!({"error":"declined","executed":false}),
+            true,
+        );
+        assert_eq!(work.revision, 3);
+        assert_eq!(work.focus, "a → b");
+        work.record(
+            "web_fetch",
+            &json!({"url":"https://example.com/docs"}),
+            &json!({"status":200,"final_url":"https://example.com/docs/"}),
+            false,
+        );
+        assert_eq!(work.focus, "Web · https://example.com/docs");
+        assert!(work.discovery.contains("HTTP 200"));
+        assert!(work.discovery.contains("https://example.com/docs/"));
+        assert_eq!(work.revision, 3);
     }
     #[test]
     fn a_later_failure_replaces_a_pass_and_legacy_history_remains_readable() {

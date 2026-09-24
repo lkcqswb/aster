@@ -124,25 +124,45 @@ fn file_history(session: &Session) -> (Vec<String>, Vec<String>) {
         for block in message["content"].as_array().into_iter().flatten() {
             if message["role"] == "assistant" && block["type"] == "tool_use" {
                 if let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str()) {
-                    calls.insert(id, (name, block["input"]["path"].as_str().unwrap_or("")));
+                    calls.insert(id, (name, &block["input"]));
                 }
             } else if message["role"] == "user"
                 && block["type"] == "tool_result"
                 && block["is_error"] != true
             {
-                let Some((name, path)) = block["tool_use_id"].as_str().and_then(|id| calls.get(id))
+                let Some((name, input)) =
+                    block["tool_use_id"].as_str().and_then(|id| calls.get(id))
                 else {
                     continue;
                 };
+                let path = input["path"].as_str().unwrap_or("");
                 let result = block["content"]
                     .as_str()
                     .and_then(|s| serde_json::from_str::<Value>(s).ok())
                     .unwrap_or(Value::Null);
-                if matches!(*name, "read_file" | "check_file") && result["executed"] != false {
+                if matches!(*name, "read_file" | "check_file" | "outline")
+                    && result["executed"] != false
+                {
                     remember(&mut read, path);
                 }
-                if matches!(*name, "write_file" | "edit_file") && result["written"] == true {
+                if *name == "read_files" {
+                    for file in result["files"].as_array().into_iter().flatten() {
+                        if file.get("error").is_none() && file["skipped"] != true {
+                            remember(&mut read, file["path"].as_str().unwrap_or(""));
+                        }
+                    }
+                }
+                if matches!(*name, "write_file" | "edit_file" | "multi_edit")
+                    && result["written"] == true
+                {
                     remember(&mut changed, path);
+                }
+                if *name == "delete_file" && result["deleted"] == true {
+                    remember(&mut changed, path);
+                }
+                if *name == "move_file" && result["moved"] == true {
+                    remember(&mut changed, input["from"].as_str().unwrap_or(""));
+                    remember(&mut changed, input["to"].as_str().unwrap_or(""));
                 }
                 if *name == "search" {
                     for hit in result["matches"].as_array().into_iter().flatten() {
@@ -155,6 +175,35 @@ fn file_history(session: &Session) -> (Vec<String>, Vec<String>) {
         }
     }
     (read, changed)
+}
+#[cfg(test)]
+mod file_history_tests {
+    use super::*;
+    #[test]
+    fn batch_reads_outlines_moves_deletes_and_multi_edits_are_remembered() {
+        let mut s = Session::new(std::path::PathBuf::from("/project"), "test".into(), true);
+        let call = |id: &str, name: &str, input: Value| json!({"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]});
+        let result = |id: &str, value: Value, error: bool| json!({"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":value.to_string(),"is_error":error}]});
+        s.messages.extend([
+            call("r", "read_files", json!({"files":[{"path":"a.rs"},{"path":".env"},{"path":"c.rs"}]})),
+            result("r", json!({"files":[{"path":"a.rs","content":"1: a"},{"path":".env","error":"private"},{"path":"c.rs","skipped":true}]}), false),
+            call("o", "outline", json!({"path":"lib.rs"})),
+            result("o", json!({"path":"lib.rs","entries":[]}), false),
+            call("m", "multi_edit", json!({"path":"lib.rs","edits":[]})),
+            result("m", json!({"written":true}), false),
+            call("v", "move_file", json!({"from":"old.rs","to":"new.rs"})),
+            result("v", json!({"moved":true}), false),
+            call("d", "delete_file", json!({"path":"gone.rs"})),
+            result("d", json!({"deleted":true}), false),
+            call("x", "delete_file", json!({"path":"kept.rs"})),
+            result("x", json!({"error":"declined","executed":false}), true),
+            call("y", "move_file", json!({"from":"stay.rs","to":"moved.rs"})),
+            result("y", json!({"error":"stale","executed":true}), true),
+        ]);
+        let (read, changed) = file_history(&s);
+        assert_eq!(read, ["a.rs", "lib.rs"]);
+        assert_eq!(changed, ["lib.rs", "old.rs", "new.rs", "gone.rs"]);
+    }
 }
 pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
     if note.len() > 2000 {

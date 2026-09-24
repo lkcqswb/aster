@@ -91,7 +91,7 @@ def main():
             assert list((state/'exports').glob('*.md'))
             send('/plan','Plan mode')
             send('/build','Build mode')
-            send('/mood happy','Build mode')
+            send('/mood happy','happy')
             if args.live2d:
                 deadline=time.monotonic()+65
                 while time.monotonic()<deadline:

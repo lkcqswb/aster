@@ -405,6 +405,8 @@ pub struct App {
     last_activity: Instant,
     last_idle_act: Instant,
     sleepy: bool,
+    /// The checkpoint id before a /compact the user started, to show its result.
+    compacting: Option<Option<String>>,
     quit: bool,
     quit_started: Option<Instant>,
 }
@@ -488,6 +490,7 @@ impl App {
             last_activity: Instant::now(),
             last_idle_act: Instant::now(),
             sleepy: false,
+            compacting: None,
             quit: false,
             quit_started: None,
         })
@@ -839,6 +842,7 @@ impl App {
             self.turn_config()?,
             false,
         ));
+        self.compacting = Some(self.session.checkpoint.as_ref().map(|c| c.id.clone()));
         self.state = "thinking".into();
         self.session.work.activity = "Summarizing earlier context".into();
         self.turn_started = Some(Instant::now());
@@ -1256,6 +1260,13 @@ impl App {
                     self.persist()?;
                     if self.quit_started.is_some() {
                         self.quit = true;
+                    }
+                    // A checkpoint you asked for opens its report, as the local one always has.
+                    if let Some(before) = self.compacting.take()
+                        && self.session.checkpoint.as_ref().map(|c| c.id.clone()) != before
+                        && self.popup.is_none()
+                    {
+                        self.command("/checkpoint")?;
                     }
                 }
             }

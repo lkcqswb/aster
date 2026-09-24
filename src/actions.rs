@@ -217,6 +217,13 @@ fn choices(work: &Work, running: bool, decision: bool, available: &Available) ->
             );
         }
     }
+    if !running {
+        add(
+            Action::Command("/models"),
+            "Models and API keys",
+            "Add a provider or key, add model names, choose one.",
+        );
+    }
     add(
         Action::Command("/help"),
         "Keys and commands",

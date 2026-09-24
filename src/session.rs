@@ -77,6 +77,9 @@ pub struct Session {
     pub context_bytes: u64,
     #[serde(default = "enabled")]
     pub auto_compact: bool,
+    /// A provider from /models; `None` uses MiniMax from `.env` or the environment.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 fn enabled() -> bool {
     true
@@ -108,6 +111,7 @@ impl Session {
             context_tokens: 0,
             context_bytes: 0,
             auto_compact: true,
+            provider: None,
         }
     }
     /// Estimated context tokens for the next request. The bytes-per-token ratio is

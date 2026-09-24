@@ -43,7 +43,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/sessions", "Find and resume a session"),
     ("/rename", "Name this conversation"),
     ("/fork", "Branch the conversation"),
-    ("/model", "Choose live MiniMax or demo"),
+    ("/models", "Add API keys and choose a model"),
+    ("/model", "Use a model name, live or demo"),
     (
         "/history",
         "Search and revisit earlier conversation entries",
@@ -82,7 +83,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/restore", "Restore archived context as a new conversation"),
     ("/export", "Save a readable transcript"),
     ("/tools", "Expand or collapse tool details"),
-    ("/mood", "neutral, happy, heart, angry"),
+    ("/mood", "Her base mood · lists them all"),
+    ("/act", "Ask 弄玉 for a gesture · lists them"),
     ("/look", "Ask 弄玉 to look toward you"),
     ("/pet", "Show or hide the companion"),
     ("/demo", "Run an offline file-and-check task"),
@@ -106,8 +108,13 @@ const NEEDS_ARGUMENT: &[&str] = &[
     "/drop",
     "/restore",
     "/permissions",
-    "/mood",
 ];
+// RENDERER-API: temporary no-op until the renderer's emote/act land; inherent methods win.
+trait Expressive {
+    fn emote(&self, _name: &str, _seconds: f32) {}
+    fn act(&self, _name: &str) {}
+}
+impl Expressive for Companion {}
 pub fn clean(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -315,6 +322,7 @@ enum Popup {
     },
     History(crate::history::History),
     Actions(crate::actions::Menu),
+    Models(Box<crate::models::Panel>),
     Project(Box<crate::navigator::Navigator>),
     Resources {
         items: Vec<crate::context::Resource>,
@@ -386,6 +394,17 @@ pub struct App {
     turn_started: Option<Instant>,
     cell_px: (f32, f32),
     meter: Option<((String, usize, String), u64)>,
+    /// The conversation's provider name and context window.
+    endpoint: (String, u64),
+    provider_test: Option<crossbeam_channel::Receiver<String>>,
+    /// Emotion cues held back while a reply streams.
+    cues: crate::emotion::Cues,
+    cued: bool,
+    /// Her current transient feeling and when it ends, as shown in her card.
+    feeling: Option<(String, Instant)>,
+    last_activity: Instant,
+    last_idle_act: Instant,
+    sleepy: bool,
     quit: bool,
     quit_started: Option<Instant>,
 }
@@ -398,9 +417,9 @@ impl App {
                 .list(&cfg.project)?
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo))
+                .unwrap_or_else(|| fresh_session(&cfg, &cli))
         } else {
-            Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo)
+            fresh_session(&cfg, &cli)
         };
         if session.project != cfg.project {
             bail!(
@@ -423,6 +442,7 @@ impl App {
             Some(Companion::start(cfg.clone(), graphics))
         };
         let prompts = crate::composer::PromptHistory::with(recent_prompts(&store, &session));
+        let endpoint = endpoint(&cfg, &session);
         Ok(Self {
             cfg,
             cli,
@@ -460,6 +480,14 @@ impl App {
             turn_started: None,
             cell_px: cell_pixels(),
             meter: None,
+            endpoint,
+            provider_test: None,
+            cues: Default::default(),
+            cued: false,
+            feeling: None,
+            last_activity: Instant::now(),
+            last_idle_act: Instant::now(),
+            sleepy: false,
             quit: false,
             quit_started: None,
         })
@@ -467,6 +495,52 @@ impl App {
     fn notify(&mut self, text: impl Into<String>) {
         self.notice = text.into();
         self.notice_at = Instant::now();
+    }
+    fn rig_expressions(&self) -> Vec<String> {
+        self.portrait.info["rig"]["expressions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.as_str().or(e["name"].as_str()).map(str::to_string))
+            .collect()
+    }
+    fn rig_motions(&self) -> Vec<String> {
+        self.portrait.info["rig"]["motions"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+    /// A passing feeling on her face; her base mood returns afterwards.
+    fn emote(&mut self, name: &str, seconds: f32) {
+        self.feeling = Some((
+            name.to_string(),
+            Instant::now() + Duration::from_secs_f32(seconds.max(0.1)),
+        ));
+        if let Some(c) = &self.companion {
+            c.emote(name, seconds);
+        }
+    }
+    /// A one-off gesture, played by her rig's own motion when it has one.
+    fn act(&mut self, name: &str) {
+        if let Some(c) = &self.companion {
+            c.act(name);
+        }
+    }
+    fn express(&mut self, cue: crate::emotion::Cue) {
+        self.cued = true;
+        match cue {
+            crate::emotion::Cue::Emotion(name) => self.emote(&name, 8.0),
+            crate::emotion::Cue::Gesture(name) => self.act(&name),
+        }
+    }
+    /// Activity wakes her; a long quiet spell lets her idle, then grow sleepy.
+    fn touch(&mut self) {
+        if self.sleepy {
+            self.sleepy = false;
+            self.emote("surprised", 1.2);
+            self.act("look_around");
+        }
+        self.last_activity = Instant::now();
     }
     fn info(&mut self, title: &str, text: impl Into<String>) {
         self.inspect(Popup::Info {
@@ -595,6 +669,8 @@ impl App {
             menu.paste(&text);
         } else if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.paste(&text);
+        } else if let Some(Popup::Models(panel)) = &mut self.popup {
+            panel.paste(&text);
         } else if matches!(&self.popup, Some(Popup::Tasks { preview: true, .. })) {
             // Inspecting must not silently change the selected command.
         } else if let Some(
@@ -639,11 +715,11 @@ impl App {
         }
     }
     fn new_session(&mut self, title: &str) -> Result<()> {
-        self.session = Session::new(
-            self.cfg.project.clone(),
-            self.session.model.clone(),
-            self.session.demo,
-        );
+        let demo = self.session.demo;
+        self.session = fresh_session(&self.cfg, &self.cli);
+        self.session.demo = demo;
+        self.refresh_endpoint();
+        self.act("wave");
         if !title.is_empty() {
             self.session.title = title.into()
         }
@@ -717,7 +793,7 @@ impl App {
    "/sessions"|"/resume"=>{if !arg.is_empty(){let s=self.store.load(arg)?;self.switch_session(s)?;}else{self.open_sessions()?;}},
    "/rename"=>{if arg.is_empty(){bail!("Use /rename followed by a title")};self.session.title=arg.chars().take(120).collect();self.session.updated=chrono::Utc::now().to_rfc3339();self.persist()?;},
    "/fork"=>{self.session=self.session.fork();if !arg.is_empty(){self.session.title=arg.into()};self.session.add("notice","Forked the conversation. This session shares the project files; no files were rolled back.");self.persist()?;self.notify("New branch saved. Project files are shared.");},
-   "/model"|"/models"=>{match arg{""=>self.info("Choose an agent",format!("Current: {}\n\n/model live     MiniMax · real model\n/model demo     Offline scripted demo\n/model NAME     Use a specific MiniMax model\n\nModel changes take effect on the next message.",if self.session.demo{"offline demo"}else{&self.session.model})),"demo"=>{self.session.demo=true;self.notify("Offline demo · no API calls");},"live"=>{self.session.demo=false;self.notify(format!("MiniMax · {}",self.session.model));},name=>{if name.len()>120{bail!("Model name is too long")};self.session.model=name.into();self.session.demo=false;self.notify(format!("Model: {name}"));}}self.persist()?;},
+   "/model"|"/models"=>{match arg{""=>self.open_models(),"demo"=>{self.session.demo=true;self.notify("Offline demo · no API calls");},"live"=>{self.session.demo=false;self.refresh_endpoint();self.notify(format!("{} · {}",self.endpoint.0,self.session.model));},name=>{if name.len()>120||name.contains(char::is_whitespace){bail!("Use a model name without spaces, up to 120 characters")};self.session.model=name.into();self.session.demo=false;self.refresh_endpoint();self.notify(format!("{} · {name}",self.endpoint.0));}}self.persist()?;},
    "/agents"=>{let rules=instructions::load(&self.cfg.project)?;self.info("Project instructions",if rules.is_empty(){"No AGENTS.md found. /init creates project guidance.".into()}else{instructions::format(&rules)});},
    "/init"=>{let p=self.cfg.project.join("AGENTS.md");if p.exists(){self.info("AGENTS.md",fs::read_to_string(p)?)}else{tools::path(&self.cfg.project,"AGENTS.md")?;crate::session::private_write(&p,b"# Project guidance\n\n- Inspect relevant files before making changes.\n- Keep changes focused on the requested task.\n- Run the project's relevant checks and report actual results.\n- Do not read or publish credentials.\n\n## Build and test\n\nAdd this project's build and test commands here.\n")?;self.notify("Created AGENTS.md. Use /agents to inspect it.");}},
    "/plan"=>{self.session.mode="plan".into();self.persist()?;self.notify("Plan mode · read and discuss, no writes or shell commands");},
@@ -731,11 +807,12 @@ impl App {
    "/restore"=>{if arg.is_empty(){bail!("Use /restore followed by the ID shown in /checkpoint")};self.persist()?;self.session=self.store.restore_checkpoint(arg,&self.cfg.project)?;self.scroll=0;self.stream.clear();self.notify("Full context restored as a new conversation. Project files are shared.");},
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
-   "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();self.notify(if self.companion.is_some(){format!("弄玉 · {arg}")}else{format!("Mood set to {arg} · Live2D is hidden, /pet on shows her")});},
+   "/mood"=>{let rig=self.rig_expressions();if arg.is_empty(){self.info("弄玉's moods",format!("Current base mood: {}\n\nEmotions\n{}\n\nHer rig's own expressions\n{}\n\n/mood NAME sets her base mood; /mood neutral returns to calm.\nShe also shows passing feelings from her replies and from what happens: checks passing or failing, questions, long quiet spells.\n/act lists gestures. /pet rig shows the controls found on her rig.",self.mood,crate::emotion::EMOTIONS.join("  "),if rig.is_empty(){"(shown once her Live2D model has loaded)".to_string()}else{rig.join("  ")}));}else{let name=arg.to_lowercase();let known=crate::emotion::EMOTIONS.contains(&name.as_str())||rig.iter().any(|e|e==arg)||matches!(name.as_str(),"heart");if !known{bail!("Unknown mood · /mood lists them")};self.mood=if name=="heart"{"love".into()}else if rig.iter().any(|e|e==arg){arg.to_string()}else{name};let mood=self.mood.clone();self.notify(if self.companion.is_some(){format!("弄玉 · {mood}")}else{format!("Mood set to {mood} · Live2D is hidden, /pet on shows her")});}},
+   "/act"=>{if arg.is_empty(){self.info("弄玉's gestures",format!("{}\n\n/act NAME plays one. Where her rig has its own motion or arm controls for a gesture, she uses them; otherwise her head and body perform it.\nHer rig's motion groups can be played by name too: {}",crate::emotion::GESTURES.join("  "),{let groups=self.rig_motions();if groups.is_empty(){"(shown once her model has loaded)".to_string()}else{groups.join("  ")}}));}else{let name=arg.to_lowercase().replace([' ','-'],"_");if !crate::emotion::GESTURES.contains(&name.as_str())&&!self.rig_motions().iter().any(|g|g==arg){bail!("Unknown gesture · /act lists them")};let gesture=if crate::emotion::GESTURES.contains(&name.as_str()){name}else{arg.to_string()};self.act(&gesture);self.notify(if self.companion.is_some(){format!("弄玉 · {gesture}")}else{"Live2D is hidden · /pet on shows her".to_string()});}},
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true);self.notify("弄玉 looks toward you");}else{self.notify("Live2D is hidden · /pet on shows her");}self.reaction=Some(("listening".into(),Instant::now()));},
-   "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
+   "/pet"=>{match arg { "rig" => {let rig=&self.portrait.info["rig"];let text=if rig.is_null(){"Her controls are discovered when her Live2D model loads. /status shows the renderer's progress.".to_string()}else{describe_rig(rig)};self.info("弄玉's rig",text);}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
-   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?,self.cfg.limits.describe())),
+   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo".to_string()}else{self.endpoint.0.clone()},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?,self.cfg.limits.describe())),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
    "/help"=>self.info("Make yourself at home",format!("{}\n\nWRITING\nEnter send · Ctrl+J, Shift+Enter or \\ Enter new line\n↑↓ move between lines, then through earlier requests\nAlt/Ctrl+←→ or Alt+B/F word · Home/End line · Ctrl+A/E line\nCtrl+W or Alt+Backspace delete word · Ctrl+U/K delete to line start/end\nEsc Esc clears the draft (↑ brings it back) · Ctrl+C clears, then quits\n\nREADING\nPgUp/PgDn page · Shift+↑↓ or wheel 3 lines · Ctrl+Home top · Ctrl+End or Esc latest\nCtrl+O shows tool details · F7 searches history\n\nWORKING\nWhile 弄玉 works: Enter steers · Alt+Enter queues · Ctrl+G redirects · Esc stops\nCtrl+P sessions (Enter open · Ctrl+N new · Ctrl+D delete)\nF1 or click 弄玉 for local task controls · F2 plan · F3 review · F4 output\nF5 checks · F6 files · F7 history · F8 tasks\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
@@ -759,7 +836,7 @@ impl App {
         self.running = Some(agent::spawn_compaction(
             self.session.clone(),
             note.into(),
-            self.cfg.clone(),
+            self.turn_config()?,
             false,
         ));
         self.state = "thinking".into();
@@ -951,10 +1028,18 @@ impl App {
         submitted.work = crate::work::Work::begin(&prompt);
         self.store.save(&submitted)?;
         self.session = submitted;
+        let cfg = match self.turn_config() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.session = before;
+                self.store.save(&self.session)?;
+                return Err(e);
+            }
+        };
         self.running = Some(agent::spawn(
             before,
             prompt,
-            self.cfg.clone(),
+            cfg,
             self.cli.permissions.clone(),
         ));
         self.stream.clear();
@@ -962,6 +1047,8 @@ impl App {
         self.state = "thinking".into();
         self.turn_started = Some(Instant::now());
         self.notice.clear();
+        self.cued = false;
+        self.act("nod");
         Ok(())
     }
     fn stop(&mut self) {
@@ -987,6 +1074,17 @@ impl App {
         if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.tick();
         }
+        if let Some(result) = self
+            .provider_test
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.provider_test = None;
+            if let Some(Popup::Models(panel)) = &mut self.popup {
+                panel.message = result.clone();
+            }
+            self.notify(result);
+        }
         let mut advance_queue = false;
         let events = self
             .running
@@ -1005,6 +1103,7 @@ impl App {
                     after_bytes,
                     ..
                 } => {
+                    self.act("stretch");
                     self.notify(format!(
                         "{} · {} → {} KB · {} · /checkpoint",
                         if automatic {
@@ -1055,6 +1154,8 @@ impl App {
                 } => {
                     self.clear_decision();
                     self.state = "waiting".into();
+                    self.act("tilt");
+                    self.emote("thinking", 3.0);
                     self.popup = Some(Popup::Question {
                         question,
                         options,
@@ -1065,15 +1166,27 @@ impl App {
                 }
                 Event::Delta(text) => {
                     self.state = "speaking".into();
+                    let visible = self.cues.feed(&text);
+                    for cue in self.cues.take() {
+                        self.express(cue);
+                    }
                     // Her mouth follows the actual rate of visible text.
                     if let Some(c) = &self.companion {
-                        c.speak(text.chars().count());
+                        c.speak(visible.chars().count());
                     }
-                    self.stream.push_str(&text);
+                    self.stream.push_str(&visible);
                 }
                 Event::State(state) => self.state = state,
                 Event::Entry(role, text) => {
                     self.stream.clear();
+                    if role == "nongyu" {
+                        self.cues.finish();
+                        if !std::mem::take(&mut self.cued)
+                            && let Some(feeling) = crate::emotion::infer(&text)
+                        {
+                            self.emote(feeling, 5.0);
+                        }
+                    }
                     self.session.add(&role, text);
                 }
                 Event::Usage(input, output) => {
@@ -1087,6 +1200,7 @@ impl App {
                 } => {
                     self.clear_decision();
                     self.state = "waiting".into();
+                    self.act("tilt");
                     self.popup = Some(Popup::Approval(Approval {
                         tool,
                         preview,
@@ -1121,9 +1235,18 @@ impl App {
                     if self.session.work.has_failures() {
                         self.notify("A check or command failed · F4 output · /work details");
                         self.reaction = Some(("concerned".into(), Instant::now()));
+                        self.emote("worried", 6.0);
                     } else if self.session.work.has_stale_checks() {
                         self.notify("Edits changed the project after checks · F5 to review");
                         self.reaction = Some(("concerned".into(), Instant::now()));
+                        self.emote("embarrassed", 4.0);
+                    } else if happy {
+                        self.emote("happy", 5.0);
+                        self.act("cheer");
+                    } else if self.session.status == "error" {
+                        self.emote("sad", 5.0);
+                    } else if self.session.status == "stopped" {
+                        self.emote("surprised", 1.5);
                     }
                     self.running = None;
                     self.turn_started = None;
@@ -1168,6 +1291,34 @@ impl App {
             self.persist()?;
             self.quit = true;
         }
+        // Never standing still: small idle gestures, then sleepiness after a long quiet spell.
+        let quiet = self.running.is_none() && self.popup.is_none() && self.composer.is_empty();
+        if quiet && self.last_activity.elapsed() > Duration::from_secs(300) && !self.sleepy {
+            self.sleepy = true;
+            self.emote("sleepy", 30.0);
+        } else if quiet
+            && self.last_activity.elapsed() > Duration::from_secs(45)
+            && self.last_idle_act.elapsed() > Duration::from_secs(40)
+        {
+            self.last_idle_act = Instant::now();
+            let gestures = ["look_around", "fidget", "tilt", "stretch"];
+            let pick = (self.last_activity.elapsed().as_secs() / 40) as usize % gestures.len();
+            self.act(gestures[pick]);
+        } else if self.sleepy
+            && self
+                .feeling
+                .as_ref()
+                .is_some_and(|(_, until)| Instant::now() > *until)
+        {
+            self.emote("sleepy", 30.0);
+        }
+        if self
+            .feeling
+            .as_ref()
+            .is_some_and(|(_, until)| Instant::now() > *until)
+        {
+            self.feeling = None;
+        }
         let state = if self.inspection_return.is_some() {
             "reading"
         } else if !self.session.work.waiting.is_empty() && self.running.is_some() {
@@ -1208,6 +1359,7 @@ impl App {
         Ok(())
     }
     fn key(&mut self, key: KeyEvent) -> Result<()> {
+        self.touch();
         let result = self.key_inner(key);
         if self.popup.is_none() && self.inspection_return.is_some() {
             self.popup = self.inspection_return.take().map(|p| *p);
@@ -1422,6 +1574,59 @@ impl App {
                         _ => {}
                     }
                     self.popup = Some(Popup::Actions(menu));
+                }
+                Popup::Models(mut panel) => {
+                    match panel.key(key) {
+                        crate::models::Outcome::Keep => self.popup = Some(Popup::Models(panel)),
+                        crate::models::Outcome::Close => {}
+                        crate::models::Outcome::Saved(message) => {
+                            self.notify(message);
+                            self.popup = Some(Popup::Models(panel));
+                        }
+                        crate::models::Outcome::Use {
+                            provider,
+                            model,
+                            demo,
+                        } => {
+                            if self.running.is_some() {
+                                panel.message =
+                                    "Finish or stop the current turn before switching models"
+                                        .into();
+                                self.popup = Some(Popup::Models(panel));
+                                return Ok(());
+                            }
+                            self.session.demo = demo;
+                            if !demo {
+                                self.session.provider = provider;
+                                self.session.model = model;
+                            }
+                            self.refresh_endpoint();
+                            self.persist()?;
+                            self.notify(if demo {
+                                "Offline demo · no API calls".to_string()
+                            } else {
+                                format!(
+                                    "{} · {} for this and new conversations",
+                                    self.endpoint.0, self.session.model
+                                )
+                            });
+                        }
+                        crate::models::Outcome::Test { provider, model } => {
+                            let mut cfg = self.cfg.clone();
+                            let registry = crate::providers::Registry::load(
+                                &crate::providers::Registry::path(&self.cfg.state),
+                            )?;
+                            registry.apply(&mut cfg, Some(&provider), &model)?;
+                            let (tx, rx) = crossbeam_channel::bounded(1);
+                            std::thread::spawn(move || {
+                                let _ = tx.send(agent::probe(&cfg, &model));
+                            });
+                            self.provider_test = Some(rx);
+                            panel.message = "Testing with one tiny request (a few tokens)…".into();
+                            self.popup = Some(Popup::Models(panel));
+                        }
+                    }
+                    return Ok(());
                 }
                 Popup::Project(mut nav) => {
                     match nav.key(key) {
@@ -1834,6 +2039,7 @@ impl App {
             );
         }
         self.session = session;
+        self.refresh_endpoint();
         self.follow_latest();
         self.stream.clear();
         self.state = "idle".into();
@@ -2061,7 +2267,44 @@ impl App {
                 tokens
             }
         };
-        tokens * 100 / self.cfg.limits.context_tokens.max(1)
+        tokens * 100 / self.window().max(1)
+    }
+    fn window(&self) -> u64 {
+        if self.endpoint.1 > 0 {
+            self.endpoint.1
+        } else {
+            self.cfg.limits.context_tokens
+        }
+    }
+    fn refresh_endpoint(&mut self) {
+        self.endpoint = endpoint(&self.cfg, &self.session);
+        self.meter = None;
+    }
+    /// The configuration a turn runs with: the conversation's provider, key and window.
+    fn turn_config(&self) -> Result<Config> {
+        let mut cfg = self.cfg.clone();
+        if !self.session.demo {
+            crate::providers::Registry::load(&crate::providers::Registry::path(&self.cfg.state))?
+                .apply(
+                &mut cfg,
+                self.session.provider.as_deref(),
+                &self.session.model,
+            )?;
+        }
+        Ok(cfg)
+    }
+    fn open_models(&mut self) {
+        let panel = crate::models::Panel::open(
+            crate::providers::Registry::path(&self.cfg.state),
+            (
+                self.session.provider.clone(),
+                self.session.model.clone(),
+                self.session.demo,
+            ),
+            !self.cfg.key.is_empty(),
+            self.cfg.model.clone(),
+        );
+        self.inspect(Popup::Models(Box::new(panel)));
     }
     pub fn draw(&mut self, f: &mut Frame) {
         let all = f.area();
@@ -2211,7 +2454,11 @@ impl App {
         let model = if self.session.demo {
             "offline demo".to_string()
         } else {
-            clean(&self.session.model)
+            format!(
+                "{} · {}",
+                clean(&self.endpoint.0),
+                clean(&self.session.model)
+            )
         };
         let right = format!("{model} · {}", &self.session.id[..6]);
         let room = (r.width as usize).saturating_sub(right.width() + 4);
@@ -2569,10 +2816,16 @@ impl App {
         } else {
             "here with you"
         };
+        let feeling = self
+            .feeling
+            .as_ref()
+            .map(|(name, _)| format!(" · {name}"))
+            .unwrap_or_default();
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("弄玉", style(FG).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("  ◌ {state}"), style(JADE)),
+                Span::styled(feeling, style(GOLD)),
             ])),
             Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), 1),
         );
@@ -2824,6 +3077,7 @@ impl App {
             Popup::History(_) => "↑↓ choose · Enter read · Tab jump · Esc close",
             Popup::Actions(_) => "↑↓ or click · Enter open · Esc back",
             Popup::Project(_) => "",
+            Popup::Models(panel) => panel.hints(),
         };
         let hint_color = if matches!(p, Popup::Approval(_) | Popup::Question { .. }) {
             GOLD
@@ -3138,6 +3392,11 @@ impl App {
             }
             Popup::Actions(_) | Popup::Sessions { .. } => unreachable!("Rendered above"),
             Popup::Project(nav) => nav.view(inner.width as usize, body_height as usize),
+            Popup::Models(panel) => (
+                "Models and API keys".into(),
+                panel.view(inner.width as usize),
+                0,
+            ),
             Popup::Resources {
                 items,
                 skills,
@@ -3268,6 +3527,81 @@ impl App {
         );
         waiting(f);
         vec![]
+    }
+}
+/// A readable view of the controls the renderer found on her rig.
+fn describe_rig(rig: &Value) -> String {
+    let mut out = String::new();
+    let parameters = rig["parameters"].as_array().cloned().unwrap_or_default();
+    out += &format!("{} parameters on her rig\n\n", parameters.len());
+    for (label, key) in [("Emotions", "emotions"), ("Gestures", "gestures")] {
+        out += &format!("{label}\n");
+        for (name, how) in rig[key].as_object().into_iter().flatten() {
+            let mut parts = vec![];
+            if let Some(e) = how["expression"].as_str() {
+                parts.push(format!("expression {e}"));
+            }
+            if let Some(m) = how["motion"].as_str() {
+                parts.push(format!("motion {m}"));
+            }
+            let params = how["params"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p["id"].as_str().or(p.as_str()))
+                .collect::<Vec<_>>();
+            if !params.is_empty() {
+                parts.push(params.join(", "));
+            }
+            if let Some(kind) = how["kind"].as_str() {
+                parts.push(kind.to_string());
+            }
+            out += &format!(
+                "  {name:12} {}\n",
+                if parts.is_empty() {
+                    "pose only".to_string()
+                } else {
+                    parts.join(" · ")
+                }
+            );
+        }
+        out += "\n";
+    }
+    out += "Parameters (id · display name · range)\n";
+    for p in parameters {
+        out += &format!(
+            "  {} · {} · {}–{}\n",
+            p["id"].as_str().unwrap_or("?"),
+            p["name"].as_str().unwrap_or(""),
+            p["min"],
+            p["max"]
+        );
+    }
+    out += "\nAdjust the mapping in aster-nongyu.json; see docs/NONGYU.md.";
+    out
+}
+/// A new conversation starts with the model chosen in /models, else MiniMax from .env.
+fn fresh_session(cfg: &Config, cli: &Cli) -> Session {
+    let mut session = Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo);
+    if cli.model.is_none()
+        && let Ok(registry) =
+            crate::providers::Registry::load(&crate::providers::Registry::path(&cfg.state))
+        && let Some(choice) = registry.default.clone()
+        && registry.find(&choice.provider).is_some()
+    {
+        session.provider = Some(choice.provider);
+        session.model = choice.model;
+    }
+    session
+}
+/// The provider name and context window a conversation will use.
+fn endpoint(cfg: &Config, session: &Session) -> (String, u64) {
+    let mut resolved = cfg.clone();
+    let registry = crate::providers::Registry::load(&crate::providers::Registry::path(&cfg.state))
+        .unwrap_or_default();
+    match registry.apply(&mut resolved, session.provider.as_deref(), &session.model) {
+        Ok(()) => (resolved.provider, resolved.limits.context_tokens),
+        Err(_) => ("missing provider".into(), cfg.limits.context_tokens),
     }
 }
 fn filter_sessions<'a>(items: &'a [Session], query: &str) -> Vec<&'a Session> {
@@ -3461,6 +3795,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         }
                     }
                     TermEvent::Paste(text) => {
+                        app.touch();
                         app.paste(&text);
                     }
                     TermEvent::Resize(_, _) => {
@@ -3495,6 +3830,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                             }
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
+                            app.touch();
                             if let Err(e) = app.click(mouse.column, mouse.row) {
                                 app.notify(e.to_string());
                             }
@@ -3535,12 +3871,20 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
             .list(&cfg.project)?
             .into_iter()
             .next()
-            .unwrap_or_else(|| Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo))
+            .unwrap_or_else(|| fresh_session(&cfg, &cli))
     } else {
-        Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo)
+        fresh_session(&cfg, &cli)
     };
     if s.project != cfg.project {
         bail!("Session belongs to another project")
+    }
+    let mut cfg = cfg;
+    if !s.demo {
+        crate::providers::Registry::load(&crate::providers::Registry::path(&cfg.state))?.apply(
+            &mut cfg,
+            s.provider.as_deref(),
+            &s.model,
+        )?;
     }
     let prompt = cli.prompt.as_deref().context("No prompt")?;
     let prior = s.clone();
@@ -3773,6 +4117,8 @@ mod layout_tests {
             chrome: root.join("chrome"),
             texture_size: 2048,
             limits: Default::default(),
+            auth: Default::default(),
+            provider: "MiniMax".into(),
         };
         let store = Store::open(&cfg.state).unwrap();
         App::new(cfg, cli, store).unwrap()
@@ -4542,6 +4888,103 @@ mod layout_tests {
             drop(a);
         }
         assert!(silent.is_empty(), "no visible feedback: {silent:?}");
+    }
+    #[test]
+    fn a_saved_key_reaches_only_its_provider_and_never_the_session_files() {
+        let d = tempfile::tempdir().unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let seen = std::thread::spawn(move || {
+            let mut request = server.recv().unwrap();
+            let headers = request
+                .headers()
+                .iter()
+                .map(|h| (h.field.to_string().to_lowercase(), h.value.to_string()))
+                .collect::<Vec<_>>();
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let events = [
+                json!({"type":"message_start","message":{"usage":{"input_tokens":30}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"〔happy〕 Hello from the local provider."}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}),
+                json!({"type":"message_stop"}),
+            ];
+            let stream = events
+                .iter()
+                .map(|v| format!("data: {v}\n\n"))
+                .collect::<String>();
+            request
+                .respond(tiny_http::Response::from_string(stream))
+                .unwrap();
+            (headers, serde_json::from_str::<Value>(&body).unwrap())
+        });
+        let mut a = app(d.path());
+        let mut registry = crate::providers::Registry::default();
+        registry
+            .upsert(
+                crate::providers::Provider {
+                    id: String::new(),
+                    name: "Local test".into(),
+                    base,
+                    auth: crate::providers::Auth::XApiKey,
+                    key: "sk-local-SECRET-4242".into(),
+                    models: vec![crate::providers::Model {
+                        name: "test-model".into(),
+                        context: Some(64_000),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+        registry
+            .save(&crate::providers::Registry::path(&a.cfg.state))
+            .unwrap();
+        a.command("/models").unwrap();
+        let text = screen(&mut a, 132, 42);
+        assert!(text.contains("Models and API keys") && text.contains("Local test · test-model"));
+        assert!(!text.contains("SECRET"));
+        // The demo row is highlighted first; Home, then down to the provider's model.
+        press(&mut a, KeyCode::Home);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.session.provider.as_deref(), Some("local-test"));
+        assert!(!a.session.demo);
+        assert_eq!(a.window(), 64_000);
+        assert!(screen(&mut a, 132, 42).contains("Local test · test-model"));
+        a.submit("hello".into()).unwrap();
+        finish(&mut a);
+        let (headers, body) = seen.join().unwrap();
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header("x-api-key"), Some("sk-local-SECRET-4242"));
+        assert_eq!(header("authorization"), None);
+        assert_eq!(header("anthropic-version"), Some("2023-06-01"));
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(a.session.status, "done");
+        // The companion's cue is hidden from the transcript but kept for the provider.
+        let reply = a
+            .session
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.role == "nongyu")
+            .unwrap();
+        assert_eq!(reply.text, "Hello from the local provider.");
+        let saved =
+            fs::read_to_string(a.store.root.join(format!("{}.json", a.session.id))).unwrap();
+        assert!(!saved.contains("SECRET"));
+        let export = fs::read_to_string(a.store.export(&a.session).unwrap()).unwrap();
+        assert!(!export.contains("SECRET") && !export.contains("〔happy〕"));
+        // New conversations start with the chosen model.
+        a.command("/new").unwrap();
+        assert_eq!(a.session.provider.as_deref(), Some("local-test"));
+        assert_eq!(a.session.model, "test-model");
     }
     #[test]
     fn multiline_composer_follows_the_cursor() {

@@ -1115,6 +1115,8 @@ mod tests {
             chrome,
             texture_size: 1024,
             limits: Default::default(),
+            auth: Default::default(),
+            provider: "MiniMax".into(),
         }
     }
     fn http() -> reqwest::blocking::Client {

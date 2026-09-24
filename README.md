@@ -173,15 +173,26 @@ By default each write or shell command is shown for approval. `y` allows that ac
 
 A completed reply means the model finished speaking. A passed check means a specific saved-file assertion was evaluated successfully. Neither alone proves the entire project is correct. Read the actual check or test output.
 
-## MiniMax
+## Models and API keys
 
-Copy `.env.example` to `.env` in the Aster checkout, replace the placeholder and restrict its permissions:
+Type `/models` (or choose **Models and API keys** from F1) to see every model you can use, add a provider or key, and switch models:
+
+- **Enter** uses the highlighted model for this conversation. New conversations start with it too.
+- **a** adds a provider. Presets fill in **Anthropic** (`https://api.anthropic.com`, `x-api-key`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`) and **MiniMax**. **Custom** covers any service with an Anthropic-compatible Messages endpoint, including a local proxy on `http://localhost`.
+- The **API key** field hides what you type or paste. **k** replaces a key; leaving the field empty while editing keeps the saved one.
+- **m** edits a provider's model names, comma-separated. `name=tokens` records a context window, which the context meter and auto-compact use.
+- **t** tests the highlighted model with one tiny request (a few tokens), explicitly and without retrying. It reports the HTTP status, and on failure whether to check the key, base URL or model name.
+- **d** removes a provider and its key after you confirm.
+
+Keys are saved only in `providers.json` beside your private sessions (`~/.local/share/aster`, owner-only, or your `--state-dir`). A key is sent only to its own provider's base URL, as `Authorization: Bearer` or `x-api-key`, whichever you chose. It never appears in sessions, transcripts, exports, notices, diagnostics or debug output; the panel shows only its last four characters. Base URLs must be https; plain http is allowed only for localhost. File tools cannot read the store, but approved shell commands run as your user and could, as with `.env`.
+
+**MiniMax from `.env`** still works without the panel. Copy `.env.example` to `.env` in the Aster checkout, replace the placeholder and restrict its permissions:
 
 ```sh
 chmod 600 .env
 ```
 
-Aster reads only the named MiniMax settings from this file; environment variables take precedence. The default model is `MiniMax-M2.7`, via MiniMax's Anthropic-compatible endpoint. Responses stream into the conversation, including streamed tool arguments. Full assistant blocks are retained privately for provider-compatible continuation. Provider redirects are rejected.
+Aster reads only the named MiniMax settings from this file; environment variables take precedence, and their base URL must be an official MiniMax endpoint. The default model is `MiniMax-M2.7`. Responses stream into the conversation, including streamed tool arguments. Full assistant blocks are retained privately for provider-compatible continuation. Provider redirects are rejected. `/model NAME` switches the model name within the current provider; `/model demo` and `/model live` switch the offline demo on and off.
 
 By default each user turn permits at most 40 model requests, 120 tool calls, 900 active seconds (15 minutes), 8,192 output tokens per request and 64,000 output tokens overall. Shell commands may run up to 600 seconds each, within the turn's remaining time. Change these when starting Aster, for example `aster --max-requests 60 --turn-seconds 1800`, or with `ASTER_MAX_REQUESTS`, `ASTER_MAX_TOOLS`, `ASTER_TURN_SECONDS`, `ASTER_MAX_OUTPUT_TOKENS`, `ASTER_TURN_OUTPUT_TOKENS`, `ASTER_CONTEXT_WINDOW` and `ASTER_AUTO_COMPACT`. `/limits` shows the values in effect. Reaching a limit stops the turn with a message; send a new message to continue. Question and approval waits pause the active timer, with a 15-minute maximum per decision. Unexecuted or declined checks are not recorded as failed tests. These are work limits, not a currency cap; input tokens also incur usage. Errors and truncated streams stop without automatic retries. A submitted request may finish and consume tokens after local cancellation.
 

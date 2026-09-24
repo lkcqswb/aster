@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "name": "Nongyu custom design",
+  "model": "弄玉运行档_无水印/弄玉.model3.json",
+  "layout": {
+    "zoom": 2.7,
+    "center": [
+      0.5,
+      0.44
+    ],
+    "anchor": [
+      0.5,
+      0.19
+    ]
+  },
+  "bindings": {
+    "head_x": "ParamAngleX",
+    "head_y": "ParamAngleY",
+    "head_z": "ParamAngleZ",
+    "body_x": "ParamBodyAngleX",
+    "eye_x": "ParamEyeBallX",
+    "eye_y": "ParamEyeBallY",
+    "eye_l": "ParamEyeLOpen",
+    "eye_r": "ParamEyeROpen",
+    "breath": "ParamBreath",
+    "mouth_open": "ParamMouthOpenY",
+    "smile_l": "ParamEyeSmile",
+    "smile_r": "ParamEyeSmileR",
+    "heart": "ParamHeartEye",
+    "tears3": "ParamTeers3",
+    "tears5": "ParamTeers5",
+    "tears2": "ParamTeers2"
+  },
+  "emotions": {
+    "neutral": {},
+    "happy": {
+      "smile_l": 0.45,
+      "smile_r": 0.45
+    },
+    "heart": {
+      "heart": 1,
+      "tears3": 1
+    },
+    "angry": {
+      "tears3": 1,
+      "tears5": 1,
+      "tears2": 1
+    },
+    "focused": {
+      "eye_y": -0.2,
+      "smile_l": 0.15,
+      "smile_r": 0.15
+    }
+  },
+  "motions": {
+    "nod": {
+      "duration_ms": 1100,
+      "blend": "add",
+      "tracks": {
+        "head_y": [
+          [
+            0,
+            0
+          ],
+          [
+            0.25,
+            3
+          ],
+          [
+            0.5,
+            -2
+          ],
+          [
+            0.75,
+            2
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    },
+    "shake": {
+      "duration_ms": 1200,
+      "blend": "add",
+      "tracks": {
+        "head_x": [
+          [
+            0,
+            0
+          ],
+          [
+            0.2,
+            -6
+          ],
+          [
+            0.4,
+            6
+          ],
+          [
+            0.6,
+            -4
+          ],
+          [
+            0.8,
+            3
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    },
+    "tilt": {
+      "duration_ms": 1800,
+      "blend": "add",
+      "tracks": {
+        "head_z": [
+          [
+            0,
+            0
+          ],
+          [
+            0.3,
+            -5
+          ],
+          [
+            0.7,
+            -5
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    },
+    "acknowledge": {
+      "duration_ms": 1500,
+      "blend": "add",
+      "tracks": {
+        "head_y": [
+          [
+            0,
+            0
+          ],
+          [
+            0.25,
+            5
+          ],
+          [
+            0.5,
+            -2
+          ],
+          [
+            1,
+            0
+          ]
+        ],
+        "head_z": [
+          [
+            0,
+            0
+          ],
+          [
+            0.5,
+            -3
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    }
+  }
+}

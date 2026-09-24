@@ -82,7 +82,12 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/restore", "Restore archived context as a new conversation"),
     ("/export", "Save a readable transcript"),
     ("/tools", "Expand or collapse tool details"),
-    ("/mood", "neutral, happy, heart, angry"),
+    (
+        "/mood",
+        "Set a profile emotion, optionally with strength 0–1",
+    ),
+    ("/emotion", "List or set a companion emotion"),
+    ("/motion", "List or play a companion motion"),
     ("/look", "Ask 弄玉 to look toward you"),
     ("/pet", "Show or hide the companion"),
     ("/demo", "Run an offline file-and-check task"),
@@ -640,6 +645,8 @@ impl App {
                 | "/help"
                 | "/status"
                 | "/mood"
+                | "/emotion"
+                | "/motion"
                 | "/look"
                 | "/pet"
                 | "/tools"
@@ -705,9 +712,24 @@ impl App {
    "/restore"=>{if arg.is_empty(){bail!("Use /restore followed by the ID shown in /checkpoint")};self.persist()?;self.session=self.store.restore_checkpoint(arg,&self.cfg.project)?;self.scroll=0;self.stream.clear();self.notify("Full context restored as a new conversation. Project files are shared.");},
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
-   "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
+   "/mood"|"/emotion"|"/motion"=>{
+       let profile=crate::companion::Profile::load(self.cfg.companion_profile.as_deref())?;
+       let motion=cmd=="/motion";
+       let names=if motion{profile.motions.keys().cloned().collect::<Vec<_>>()}else{profile.emotions.keys().cloned().collect::<Vec<_>>()};
+       if arg.is_empty(){self.info(if motion{"Companion motions"}else{"Companion emotions"},format!("{}\n\n{} NAME [strength] · strength 0–1\n/pet info · supported parameters and last result\n/pet reset · clear custom expression, motion and gaze",names.join("\n"),cmd));}
+       else {
+           let parts=arg.split_whitespace().collect::<Vec<_>>();
+           if parts.len()>2 || !names.iter().any(|n|n==parts[0]){bail!("Choose a configured name: {}",names.join(", "))};
+           let strength=parts.get(1).map(|v|v.parse::<f64>()).transpose()?.unwrap_or(1.0);
+           let command=if motion{crate::companion::Control::Motion{name:parts[0].into(),strength}}else{crate::companion::Control::Emotion{name:parts[0].into(),strength}};
+           let companion=self.companion.as_ref().context("Live2D is hidden; use /pet on")?;
+           companion.control(command)?;
+           if !motion{self.mood=parts[0].into();}
+           self.notify("Companion control queued · /pet info shows the renderer result");
+       }
+   },
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
-   "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
+   "/pet"=>{match arg { "info" => {self.info("Companion interface v1",serde_json::to_string_pretty(&json!({"api":self.portrait.info["api"],"control":self.portrait.info["control"],"results":self.portrait.info["control_results"]}))?);}, "reset" => {self.companion.as_ref().context("Live2D is hidden; use /pet on")?.control(crate::companion::Control::Reset)?;self.mood="neutral".into();}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, off, retry, info or reset") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?,self.cfg.limits.describe())),
    "/stop"=>self.stop(),
@@ -3677,6 +3699,7 @@ mod layout_tests {
             model: "MiniMax-M2.7".into(),
             pet: root.join("pet"),
             chrome: root.join("chrome"),
+            companion_profile: None,
             texture_size: 2048,
             limits: Default::default(),
         };

@@ -25,6 +25,7 @@ pub struct Motion {
     pub mood: String,
     pub tap: bool,
     pub look: bool,
+    pub commands: Vec<Value>,
 }
 #[derive(Clone)]
 pub struct PortraitFrame {
@@ -113,6 +114,17 @@ impl Companion {
         s.motion.tap |= tap;
         s.motion.look |= look;
     }
+    /// Queue a cosmetic control. A renderer acknowledgement reports actual acceptance.
+    pub fn control(&self, command: crate::companion::Control) -> Result<String> {
+        command.validate()?;
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.motion.commands.len() >= 32 {
+            bail!("Companion control queue is full; wait for the renderer")
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        s.motion.commands.push(json!({"id":id,"command":command}));
+        Ok(id)
+    }
     pub fn current(&self) -> Shared {
         self.shared
             .lock()
@@ -186,25 +198,74 @@ impl Drop for AssetServer {
     }
 }
 fn assets(cfg: &Config) -> Result<AssetServer> {
-    let model = cfg.pet.join("弄玉运行档_无水印");
-    let model_file = model.join("弄玉.model3.json");
-    let definition: Value = serde_json::from_slice(
-        &fs::read(&model_file)
-            .context("Cannot find 弄玉.model3.json; set --pet-dir to desktop-pet/assets")?,
-    )?;
+    let profile = crate::companion::Profile::load(cfg.companion_profile.as_deref())?;
+    let model_file = cfg.pet.join(&profile.model);
+    let model = model_file
+        .parent()
+        .context("Model has no parent directory")?;
+    let root = cfg.pet.canonicalize()?;
+    if !model_file
+        .canonicalize()
+        .context("Cannot find model; check --pet-dir and --companion-profile")?
+        .starts_with(&root)
+    {
+        bail!("Live2D model escapes the asset directory");
+    }
+    let mut text = Vec::new();
+    fs::File::open(&model_file)?
+        .take(1_000_001)
+        .read_to_end(&mut text)?;
+    if text.len() > 1_000_000 {
+        bail!("Model definition exceeds 1 MB")
+    }
+    let definition: Value = serde_json::from_slice(&text)?;
     let mut paths = HashMap::<String, PathBuf>::new();
-    paths.insert("model/弄玉.model3.json".into(), model_file);
-    for key in ["Moc", "Physics", "DisplayInfo"] {
+    let filename = model_file
+        .file_name()
+        .context("Model has no file name")?
+        .to_str()
+        .context("Model name is not UTF-8")?;
+    paths.insert(format!("model/{filename}"), model_file.clone());
+    let mut reference = |p: &str| -> Result<()> {
+        if !crate::companion::relative(p) {
+            bail!("Live2D references must be relative local paths")
+        }
+        paths.insert(format!("model/{p}"), model.join(p));
+        Ok(())
+    };
+    for key in ["Moc", "Physics", "DisplayInfo", "Pose", "UserData"] {
         if let Some(p) = definition["FileReferences"][key].as_str() {
-            paths.insert(format!("model/{p}"), model.join(p));
+            reference(p)?;
         }
     }
     for p in definition["FileReferences"]["Textures"]
         .as_array()
         .context("No Live2D textures")?
     {
-        let p = p.as_str().context("Invalid texture name")?;
-        paths.insert(format!("model/{p}"), model.join(p));
+        reference(p.as_str().context("Invalid texture name")?)?;
+    }
+    for expression in definition["FileReferences"]["Expressions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        reference(
+            expression["File"]
+                .as_str()
+                .context("Invalid expression file")?,
+        )?;
+    }
+    for group in definition["FileReferences"]["Motions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|v| v.values())
+    {
+        for motion in group.as_array().context("Invalid motion group")? {
+            reference(motion["File"].as_str().context("Invalid motion file")?)?;
+            if let Some(sound) = motion["Sound"].as_str() {
+                reference(sound)?;
+            }
+        }
     }
     for name in [
         "pixi.min.js",
@@ -230,7 +291,7 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
     let expected_host = address.to_string();
-    let settings = json!({"texture_size":cfg.texture_size})
+    let settings = json!({"texture_size":cfg.texture_size,"profile":profile})
         .to_string()
         .into_bytes();
     let join = thread::spawn(move || {
@@ -257,6 +318,11 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
                     Some((
                         include_bytes!("../live2d/renderer.html").to_vec(),
                         "text/html",
+                    ))
+                } else if name == "companion.js" {
+                    Some((
+                        include_bytes!("../live2d/companion.js").to_vec(),
+                        "application/javascript",
                     ))
                 } else if name == "settings.json" {
                     Some((settings.clone(), "application/json"))
@@ -487,10 +553,10 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
             let m = s.motion.clone();
             s.motion.tap = false;
             s.motion.look = false;
+            s.motion.commands.clear();
             m
         };
-        let state =
-            json!({"state":motion.state,"mood":motion.mood,"tap":motion.tap,"look":motion.look});
+        let state = json!({"state":motion.state,"mood":motion.mood,"tap":motion.tap,"look":motion.look,"commands":motion.commands});
         let value = cdp.evaluate(&format!("window.asterFrame({state},{dt})"))?;
         let png = STANDARD.decode(
             value["png"]
@@ -501,6 +567,10 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
         {
             let mut s = shared.lock().unwrap();
             s.frames += 1;
+            s.info["control"] = value["control"].clone();
+            if value["results"].as_array().is_some_and(|v| !v.is_empty()) {
+                s.info["control_results"] = value["results"].clone();
+            }
             s.frame = Some(PortraitFrame {
                 png,
                 sequence: s.frames,
@@ -620,7 +690,7 @@ pub fn halfblocks(frame: &PortraitFrame, area: Rect, buf: &mut Buffer) {
         }
     }
 }
-pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
+pub fn probe(cfg: &Config, dir: &Path, emotion: Option<&str>, motion: Option<&str>) -> Result<()> {
     fs::create_dir_all(dir)?;
     let c = Companion::start(cfg.clone());
     let started = Instant::now();
@@ -649,6 +719,78 @@ pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
                         &json!({"info":s.info,"frames":s.frames,"animation_changes":true}),
                     )?,
                 )?;
+                fs::write(
+                    dir.join("interface.json"),
+                    serde_json::to_vec_pretty(&s.info["api"])?,
+                )?;
+                if emotion.is_some() || motion.is_some() {
+                    use crate::companion::Control;
+                    c.motion("idle", "neutral", false, false);
+                    let mut results = vec![];
+                    let mut capture = |label: &str, command: Control| -> Result<()> {
+                        let id = c.control(command)?;
+                        let until = Instant::now() + Duration::from_secs(10);
+                        loop {
+                            if crate::lifecycle::requested() {
+                                bail!("Preview interrupted")
+                            }
+                            let observed = c.current();
+                            if observed.status.starts_with("Live2D unavailable") {
+                                bail!(observed.status)
+                            }
+                            if let Some(result) = observed.info["control_results"]
+                                .as_array()
+                                .and_then(|rs| rs.iter().find(|r| r["id"] == id))
+                            {
+                                if result["ok"] != true {
+                                    bail!("Control rejected: {}", result["error"])
+                                }
+                                fs::write(
+                                    dir.join(format!("{label}.png")),
+                                    &observed.frame.context("No preview frame")?.png,
+                                )?;
+                                results.push(json!({"label":label,"acknowledgement":result,"control":observed.info["control"]}));
+                                return Ok(());
+                            }
+                            if Instant::now() >= until {
+                                bail!("Companion control was not acknowledged")
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    };
+                    capture("neutral", Control::Reset)?;
+                    if let Some(name) = emotion {
+                        capture(
+                            "emotion",
+                            Control::Emotion {
+                                name: name.into(),
+                                strength: 0.7,
+                            },
+                        )?;
+                    }
+                    if let Some(name) = motion {
+                        capture(
+                            "motion",
+                            Control::Motion {
+                                name: name.into(),
+                                strength: 0.8,
+                            },
+                        )?;
+                    }
+                    capture(
+                        "look",
+                        Control::Look {
+                            x: 0.4,
+                            y: 0.2,
+                            duration_ms: 1000,
+                        },
+                    )?;
+                    capture("reset", Control::Reset)?;
+                    fs::write(
+                        dir.join("controls.json"),
+                        serde_json::to_vec_pretty(&results)?,
+                    )?;
+                }
                 println!(
                     "Live2D model loaded; {} distinct frame intervals captured in {}",
                     s.frames,
@@ -701,6 +843,7 @@ mod tests {
             model: String::new(),
             pet,
             chrome: root.path().join("chrome"),
+            companion_profile: None,
             texture_size: 1024,
             limits: Default::default(),
         };
@@ -716,7 +859,17 @@ mod tests {
             .unwrap()
             .json()
             .unwrap();
-        assert_eq!(settings, json!({"texture_size":1024}));
+        assert_eq!(settings["texture_size"], 1024);
+        assert_eq!(settings["profile"]["version"], 1);
+        assert!(
+            client
+                .get(format!("{}companion.js", server.url))
+                .send()
+                .unwrap()
+                .text()
+                .unwrap()
+                .contains("AsterCompanion")
+        );
         assert_eq!(
             client
                 .get(format!("{}.env", server.url))
@@ -734,6 +887,68 @@ mod tests {
                 .status(),
             403
         );
+    }
+    #[test]
+    fn custom_model_profiles_allow_local_motion_and_expression_references_only() {
+        let root = tempfile::tempdir().unwrap();
+        let pet = root.path().join("assets");
+        let model = pet.join("custom");
+        fs::create_dir_all(&model).unwrap();
+        fs::create_dir(pet.join("vendor")).unwrap();
+        let metadata = model.join("avatar.model3.json");
+        fs::write(&metadata, r#"{"FileReferences":{"Moc":"rig.moc3","Textures":["texture.png"],"Expressions":[{"Name":"smile","File":"smile.exp3.json"}],"Motions":{"Idle":[{"File":"idle.motion3.json"}]}}}"#).unwrap();
+        for filename in [
+            "rig.moc3",
+            "texture.png",
+            "smile.exp3.json",
+            "idle.motion3.json",
+        ] {
+            fs::write(model.join(filename), "fixture").unwrap();
+        }
+        for filename in [
+            "pixi.min.js",
+            "live2dcubismcore.min.js",
+            "pixi-live2d-display-cubism4.min.js",
+        ] {
+            fs::write(pet.join("vendor").join(filename), "fixture").unwrap();
+        }
+        let mut profile = crate::companion::Profile::load(None).unwrap();
+        profile.model = "custom/avatar.model3.json".into();
+        let path = root.path().join("profile.json");
+        fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+        let cfg = Config {
+            home: root.path().into(),
+            project: root.path().into(),
+            state: root.path().join("state"),
+            key: String::new(),
+            base: String::new(),
+            model: String::new(),
+            pet,
+            chrome: root.path().join("chrome"),
+            companion_profile: Some(path),
+            texture_size: 1024,
+            limits: Default::default(),
+        };
+        let server = assets(&cfg).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for filename in ["smile.exp3.json", "idle.motion3.json"] {
+            assert_eq!(
+                client
+                    .get(format!("{}model/{filename}", server.url))
+                    .send()
+                    .unwrap()
+                    .text()
+                    .unwrap(),
+                "fixture"
+            );
+        }
+        drop(server);
+        fs::write(&metadata, r#"{"FileReferences":{"Moc":"rig.moc3","Textures":["texture.png"],"Motions":{"Idle":[{"File":"../secret.motion3.json"}]}}}"#).unwrap();
+        assert!(assets(&cfg).is_err());
     }
     #[test]
     fn graphics_packets_are_inline_and_chunked() {
@@ -779,6 +994,7 @@ mod tests {
             model: String::new(),
             pet: root.path().join("pet"),
             chrome: root.path().join("missing-chrome"),
+            companion_profile: None,
             texture_size: 2048,
             limits: Default::default(),
         };

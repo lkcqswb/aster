@@ -11,3 +11,13 @@ __pycache__/
 /target/
 .aster/
 *.cast
+
+# Local Live2D model exports and vendor runtime binaries stay outside source control.
+*.moc3
+*.model3.json
+*.physics3.json
+*.cdi3.json
+*.motion3.json
+*.exp3.json
+/live2d/vendor/
+/live2d/models/

@@ -42,7 +42,8 @@ The companion pane is part of the terminal layout, not a separate window. iTerm2
 - Send a message: she thinks while waiting, works during tools, and speaks during streamed text.
 - Pass a file check: a brief pleased reaction. Fail or encounter an error: a concerned state.
 - Click the portrait or use `/look` for a glance and nod.
-- `/mood happy`, `/mood heart`, `/mood angry`, `/mood neutral` change her expression.
+- `/emotion happy 0.7` (or `/mood happy`) changes her expression; `/motion nod` plays a gesture.
+- `/emotion` and `/motion` list configured names; `/pet reset` clears custom controls; `/pet info` inspects the actual interface.
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
@@ -68,6 +69,8 @@ By default Aster reads existing assets here:
     弄玉.cdi3.json
     弄玉.4096/texture_*.png
 ```
+
+**Custom design:** [Live2D API and autodesign guide](docs/COMPANION_API.md) includes versioned JSON profiles, a JSON Schema, TypeScript contracts, a standalone JavaScript controller and the Rust bridge. You can generate your own emotions/keyframe motions, validate them with `--check-companion`, export actual rig capabilities and preview controls locally. Model assets and vendor SDKs remain local.
 
 Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address.
 
@@ -127,7 +130,7 @@ The footer shows short hints, the context meter and the session's input/output t
 | `/follow MESSAGE` | Queue the next task after a normal finish |
 | `/queue`, `/next`, `/drop ID` | Inspect, resume or remove waiting messages |
 | `/tools` | Expand or collapse tool output |
-| `/mood`, `/look`, `/pet` | Interact with the character |
+| `/emotion`, `/mood`, `/motion`, `/look`, `/pet` | Inspect or control custom companion expressions and gestures |
 | `/demo` | Run a scripted, real file-write and verification example |
 | `/status`, `/help`, `/stop`, `/quit` | Inspect, learn, interrupt, leave |
 

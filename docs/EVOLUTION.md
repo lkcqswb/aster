@@ -88,3 +88,7 @@ A keyboard that behaves like a text editor and a transcript that cannot strand y
 Per-turn limits are configurable and higher by default. Auto-compact archives the full context and replaces older exchanges with a model-written summary from one bounded, tool-free request before a request would crowd the window, falling back to local excerpts without retrying. New file tools and a reworked Live2D presentation are described in their own documents.
 
 Next: preserve queued work when a turn needs attention, and make resuming that work explicit.
+
+## Delivered in 0.19
+
+Public Companion API v1 with declarative model/layout/binding profiles, named parameter emotions, one-shot keyframe motions, timed gaze, reset, real parameter bounds and acknowledgement snapshots. The terminal accepts custom emotion/motion names and strengths. JSON Schema, TypeScript types, asset-free contract tests, local profile validation and actual-model interface/preview export support AI-generated designs. Models and SDK assets remain local. Capability introspection found and corrected two nonexistent smile parameter names in the old renderer.

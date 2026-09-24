@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "name": "My companion",
+  "model": "my-model/model.model3.json",
+  "layout": {
+    "zoom": 1,
+    "center": [
+      0.5,
+      0.5
+    ],
+    "anchor": [
+      0.5,
+      0.5
+    ]
+  },
+  "bindings": {
+    "head_x": "ParamAngleX",
+    "head_y": "ParamAngleY",
+    "head_z": "ParamAngleZ",
+    "body_x": "ParamBodyAngleX",
+    "eye_x": "ParamEyeBallX",
+    "eye_y": "ParamEyeBallY",
+    "eye_l": "ParamEyeLOpen",
+    "eye_r": "ParamEyeROpen",
+    "breath": "ParamBreath",
+    "mouth_open": "ParamMouthOpenY",
+    "smile_l": "ParamEyeLSmile",
+    "smile_r": "ParamEyeRSmile"
+  },
+  "emotions": {
+    "neutral": {},
+    "happy": {
+      "smile_l": 0.45,
+      "smile_r": 0.45
+    }
+  },
+  "motions": {
+    "nod": {
+      "duration_ms": 1100,
+      "blend": "add",
+      "tracks": {
+        "head_y": [
+          [
+            0,
+            0
+          ],
+          [
+            0.25,
+            3
+          ],
+          [
+            0.5,
+            -2
+          ],
+          [
+            0.75,
+            2
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    },
+    "shake": {
+      "duration_ms": 1200,
+      "blend": "add",
+      "tracks": {
+        "head_x": [
+          [
+            0,
+            0
+          ],
+          [
+            0.2,
+            -6
+          ],
+          [
+            0.4,
+            6
+          ],
+          [
+            0.6,
+            -4
+          ],
+          [
+            0.8,
+            3
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    },
+    "tilt": {
+      "duration_ms": 1800,
+      "blend": "add",
+      "tracks": {
+        "head_z": [
+          [
+            0,
+            0
+          ],
+          [
+            0.3,
+            -5
+          ],
+          [
+            0.7,
+            -5
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    }
+  }
+}

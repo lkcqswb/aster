@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lkcqswb/aster/blob/main/live2d/profile.schema.json",
+  "title": "Aster Companion Profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "name",
+    "model",
+    "layout",
+    "bindings",
+    "emotions",
+    "motions"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "model": {
+      "type": "string",
+      "minLength": 13,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:?#%\\u0000-\\u001f\\u007f])(?!.*//).+\\.model3\\.json$"
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zoom",
+        "center",
+        "anchor"
+      ],
+      "properties": {
+        "zoom": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 5
+        },
+        "center": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "anchor": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 128,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{1,64}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{1,64}$"
+      }
+    },
+    "emotions": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 32,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{1,64}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 0,
+        "maxProperties": 128,
+        "propertyNames": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "additionalProperties": {
+          "type": "number",
+          "minimum": -10000,
+          "maximum": 10000
+        }
+      },
+      "required": [
+        "neutral"
+      ]
+    },
+    "motions": {
+      "type": "object",
+      "minProperties": 0,
+      "maxProperties": 32,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{1,64}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "duration_ms",
+          "blend",
+          "tracks"
+        ],
+        "properties": {
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 10000
+          },
+          "blend": {
+            "enum": [
+              "add",
+              "set"
+            ]
+          },
+          "tracks": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 128,
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "additionalProperties": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 64,
+              "items": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  {
+                    "type": "number",
+                    "minimum": -10000,
+                    "maximum": 10000
+                  }
+                ],
+                "items": false
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$comment": "Runtime validation also enforces UTF-8 byte limits, unique parameter IDs, references to defined channels, strictly increasing keyframe times with endpoints 0 and 1, and model path components."
+}

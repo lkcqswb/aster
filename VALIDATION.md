@@ -1,3 +1,15 @@
+# Live command work and recovery 0.6 — 2026-09-24
+
+- **43 Rust tests passed**, including output arriving before process exit, exact failure status/stderr, distinct cancellation and timeout, bounded first/last capture, and direct local commands with no key or model request. Formatting, Clippy with warnings denied and the release build passed.
+- The animated PTY command workflow passed with **92 distinct Live2D frames**: output was visible before exit, exit 7 and stderr were saved, timeout was distinguished from stop, the interrupted command ended, and Aster exited with status 0. Evidence: `.aster/qa/command-live2d-e2e.json`. Queue, context and general terminal regressions also passed.
+- `/run python3 -m unittest -v` reproduced three failing tests with **zero model requests**. `/recover` then used MiniMax to plan, inspect, make an approved exact edit and run the approved test command. The three unchanged tests passed, including an independent rerun. Session `fd041b063014`: **5 provider requests, 7 total tools including the initial local command, 10,677 input tokens, 722 output tokens**, exit 0. Evidence: `.aster/qa/agent-recovery-live.json`.
+- An earlier recovery test was interrupted before its edit was approved because the test driver inspected a partially drawn approval. That saved attempt used **2 requests, 2,947 input tokens, 317 output tokens**. The driver now waits for the complete expected edit/command before approving. Total live usage across these two attempts: **13,624 input tokens, 1,039 output tokens**. No provider transport failure or truncation was automatically retried.
+- Headless direct-command checks returned exit 0 for success and exit 1 for failure, both with zero model requests. The command panel was rendered from the real draw function with the actual model and visually inspected. Failed-check attention now persists in the companion until new work replaces it.
+- Other test-driver fixes distinguish panel content from old transcript text and strip panel borders when checking output. A previous apparent quit hang was the driver sending its command before the panel opened; the corrected animated flow exited cleanly.
+- Three independently started renderer probes completed on their first attempt in **5.15, 5.01 and 5.03 seconds**, each capturing changing frames. They loaded the original nine 4096-pixel textures. This does not establish the cause of intermittent slow starts; resource optimization is still planned.
+
+---
+
 # Skills and project context 0.5 — 2026-09-24
 
 - **39 Rust tests passed**, with YAML metadata/precedence, lazy skill loading, explicit-only skills, supporting-file boundaries, selected-line attachments, scoped project rules and readable-transcript/provider-context separation. Formatting, Clippy with warnings denied and the release build passed.

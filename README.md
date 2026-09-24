@@ -98,6 +98,9 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/permissions ask\|allow\|deny` | Control file-write and shell approval |
 | `/model live\|demo\|NAME` | Select MiniMax, the offline demo, or a model name |
 | `/check FILE [JSON]` | Check existence, or compare saved JSON with an expected value |
+| `/run COMMAND` | Run a local command without calling the model |
+| `/output` | Watch current command output, elapsed time and final status |
+| `/recover` | Ask the model to investigate the latest command failure |
 | `/work` | Inspect the current task plan, files and independent evidence |
 | `/review` | Review diffs from file tools in this turn |
 | `/steer MESSAGE` | Redirect current work at the next tool boundary |
@@ -126,7 +129,9 @@ The tools are `read_skill`, `list_files`, `read_file`, `search`, `write_file`, `
 
 `edit_file` replaces a single exact occurrence and rejects ambiguous matches. File edits are prepared before approval, displayed as a diff, and committed atomically only if the file still matches the reviewed version. Intervening user edits are preserved. `update_plan` reports progress; it cannot manufacture verification evidence. `ask_user` waits for a numbered choice or a typed answer, and returns that answer to the model before dependent work continues.
 
-By default each write or shell command is shown for approval. `y` allows that action once; `n` or Escape declines it. Plan mode forbids writes and shell commands regardless of the approval setting. **Approved shell commands run as your user and are not a filesystem sandbox.** Credential environment variables are removed from their environment. Commands have a 30-second timeout, bounded captured output and process-group cancellation.
+By default each write or shell command is shown for approval. `y` allows that action once; `n` or Escape declines it. Plan mode forbids writes and shell commands regardless of the approval setting. **Approved shell commands run as your user and are not a filesystem sandbox.** Credential environment variables are removed from their environment. Commands default to 30 seconds; the model can request 1–120 seconds, bounded by the remaining active turn time. The approval shows the command and requested limit. Output streams into **F4 /output** beside 弄玉, and clicking her during a command opens that view. The final record distinguishes exit status, timeout and your stop action. Capture retains the first and last 16 KB of each stream, while the live panel shows its latest 4 KB. Process-group cancellation stops background children too.
+
+`/run COMMAND` uses the same permission and plan-mode rules with no model request. After a failure, `/recover` starts a new model turn to inspect the evidence, make a focused repair and check it. It does not automatically repeat the command or approve another action. Try `/demo command`, `/demo command timeout` and `/demo command stop` for local examples.
 
 A completed reply means the model finished speaking. A passed check means a specific saved-file assertion was evaluated successfully. Neither alone proves the entire project is correct. Read the actual check or test output.
 
@@ -149,7 +154,7 @@ aster --project /path/to/project --prompt 'Explain this project'
 aster --demo --permissions allow --prompt 'demo task'
 ```
 
-Non-interactive mode declines actions that need confirmation unless `--permissions allow` was explicitly selected.
+Non-interactive mode declines actions that need confirmation unless `--permissions allow` was explicitly selected. A headless `/run` exits nonzero when its command fails, times out, is stopped or is denied.
 
 ## Development and verification
 

@@ -34,6 +34,8 @@ pub struct Work {
     pub waiting: String,
     pub skills: Vec<String>,
     pub context_files: Vec<String>,
+    pub command: Option<crate::tools::CommandProgress>,
+    pub model_requests: u64,
 }
 impl Work {
     pub fn begin(prompt: &str) -> Self {
@@ -145,6 +147,25 @@ impl Work {
         }
         if !self.context_files.is_empty() {
             out += &format!("\nAttached files\n{}\n", self.context_files.join("\n"));
+        }
+        if let Some(command) = &self.command {
+            out += &format!(
+                "\nLatest command\n$ {}\n{:.1}s · {} output bytes · {}\nF4 /output opens its output.\n",
+                command.command,
+                command.elapsed_ms as f64 / 1000.,
+                command.total_bytes,
+                if command.running {
+                    "running"
+                } else if command.timed_out {
+                    "timed out"
+                } else if command.stopped {
+                    "stopped"
+                } else if command.exit_code == Some(0) {
+                    "exit 0"
+                } else {
+                    "failed"
+                }
+            );
         }
         out
     }

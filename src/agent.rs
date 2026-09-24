@@ -31,7 +31,7 @@ pub enum Event {
         answer: Sender<bool>,
     },
     Checkpoint(Box<Session>),
-    Work(crate::work::Work),
+    Work(Box<crate::work::Work>),
     Question {
         question: String,
         options: Vec<String>,
@@ -145,7 +145,7 @@ fn inject_steering(
     }
     if count > 0 {
         s.work.activity = "Reading your update".into();
-        let _ = tx.send(Event::Work(s.work.clone()));
+        let _ = tx.send(Event::Work(Box::new(s.work.clone())));
         let _ = tx.send(Event::Checkpoint(Box::new(s.clone())));
     }
     count
@@ -191,19 +191,32 @@ fn turn_with_input(
     s.messages.push(json!({"role":"user","content":prompt}));
     s.status = "thinking".into();
     s.work = crate::work::Work::begin(prompt);
-    let _ = tx.send(Event::Work(s.work.clone()));
+    let _ = tx.send(Event::Work(Box::new(s.work.clone())));
     let outcome = (|| -> Result<()> {
+        if prompt.trim() == "/run" {
+            bail!("Use /run followed by a shell command");
+        }
+        let direct_command = prompt.strip_prefix("/run ");
         let rules = instructions::load(&s.project)?;
         let mut seen = rules.iter().map(|r| r.path.clone()).collect::<HashSet<_>>();
         let catalog = crate::context::discover(&s.project);
-        let prepared = crate::context::prepare(&s.project, prompt, &catalog)?;
+        let prepared = if direct_command.is_some() {
+            crate::context::Prepared {
+                content: prompt.into(),
+                files: vec![],
+                skills: vec![],
+                rules: vec![],
+            }
+        } else {
+            crate::context::prepare(&s.project, prompt, &catalog)?
+        };
         for rule in &prepared.rules {
             seen.insert(rule.path.clone());
         }
         s.work.skills = prepared.skills;
         s.work.context_files = prepared.files;
         s.messages.last_mut().context("Missing user message")?["content"] = json!(prepared.content);
-        let _ = tx.send(Event::Work(s.work.clone()));
+        let _ = tx.send(Event::Work(Box::new(s.work.clone())));
         let system = format!("{}{}", persona(&s, &rules), catalog.advertised());
         let mut started = Instant::now();
         let initial_output = s.output_tokens;
@@ -212,7 +225,21 @@ fn turn_with_input(
             if cancel.load(Ordering::Relaxed) {
                 bail!("Stopped by you")
             }
-            inject_steering(&mut s, tx, input);
+            if direct_command.is_none() {
+                inject_steering(&mut s, tx, input);
+            }
+            if turn > 0 && direct_command.is_some() {
+                s.status = "done".into();
+                s.work.activity = "Command finished · review its output".into();
+                s.work.waiting.clear();
+                entry(
+                    &mut s,
+                    tx,
+                    "notice",
+                    "Local command finished. F4 opens its output; /recover investigates a failure.",
+                );
+                return Ok(());
+            }
             let remaining = 180u64.saturating_sub(started.elapsed().as_secs());
             if remaining == 0 {
                 bail!("Time limit reached (180 seconds)")
@@ -222,7 +249,9 @@ fn turn_with_input(
                 bail!("Output token limit reached")
             }
             let _ = tx.send(Event::State("thinking".into()));
-            let response = if s.demo {
+            let response = if let Some(command) = direct_command {
+                json!({"content":[{"type":"tool_use","id":format!("local-command-{}",uuid::Uuid::new_v4().simple()),"name":"shell","input":{"command":command}}],"stop_reason":"tool_use","usage":{}})
+            } else if s.demo {
                 demo_response(turn, prompt, &s.messages, cancel, tx)?
             } else {
                 if cfg.key.is_empty() {
@@ -230,6 +259,7 @@ fn turn_with_input(
                         "MiniMax key is missing. Configure ANTHROPIC_AUTH_TOKEN in Aster's private .env."
                     )
                 }
+                s.work.model_requests += 1;
                 request(
                     cfg,
                     &s,
@@ -306,7 +336,7 @@ fn turn_with_input(
                 if let Some(focus) = args["path"].as_str().or(args["command"].as_str()) {
                     s.work.focus = tools::clip(focus, 240);
                 }
-                let _ = tx.send(Event::Work(s.work.clone()));
+                let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                 let mut executed = false;
                 let outcome = (|| -> Result<Value> {
                     tools::validate(name, args)?;
@@ -327,7 +357,7 @@ fn turn_with_input(
                     if name == "update_plan" {
                         s.work.set_plan(&args["steps"])?;
                         s.tools += 1;
-                        let _ = tx.send(Event::Work(s.work.clone()));
+                        let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                         return Ok(json!({"plan_updated":true,"steps":s.work.steps}));
                     }
                     if name == "ask_user" {
@@ -344,7 +374,7 @@ fn turn_with_input(
                         let (answer, rx) = bounded(1);
                         entry(&mut s, tx, "nongyu", question);
                         s.work.waiting = question.into();
-                        let _ = tx.send(Event::Work(s.work.clone()));
+                        let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                         tx.send(Event::Question {
                             question: question.into(),
                             options,
@@ -408,7 +438,7 @@ fn turn_with_input(
                         }
                         if permission != "allow" {
                             s.work.waiting = format!("Review {name} before I continue");
-                            let _ = tx.send(Event::Work(s.work.clone()));
+                            let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                             let (answer, rx) = bounded(1);
                             tx.send(Event::Approval {
                                 tool: name.into(),
@@ -428,7 +458,7 @@ fn turn_with_input(
                     }
                     let _ = tx.send(Event::State("working".into()));
                     s.work.waiting.clear();
-                    let _ = tx.send(Event::Work(s.work.clone()));
+                    let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                     if cancel.load(Ordering::Relaxed) {
                         bail!("Stopped by you");
                     }
@@ -440,7 +470,25 @@ fn turn_with_input(
                     if let Some(edit) = prepared {
                         edit.commit(&s.project)
                     } else {
-                        tools::execute(&s.project, name, args, cancel)
+                        let mut bounded_args = args.clone();
+                        if name == "shell" {
+                            let requested = tools::shell_timeout(args)?;
+                            let remaining = 180u64.saturating_sub(started.elapsed().as_secs());
+                            if remaining == 0 {
+                                bail!("Active turn deadline reached before command execution");
+                            }
+                            bounded_args["timeout_secs"] = json!(requested.min(remaining));
+                        }
+                        tools::execute_with_progress(
+                            &s.project,
+                            name,
+                            &bounded_args,
+                            cancel,
+                            &mut |progress| {
+                                s.work.command = Some(progress.clone());
+                                let _ = tx.send(Event::Work(Box::new(s.work.clone())));
+                            },
+                        )
                     }
                 })();
                 let (value, error) = match outcome {
@@ -449,7 +497,7 @@ fn turn_with_input(
                 };
                 let _ = tx.send(Event::DecisionClosed);
                 s.work.record(name, args, &value, error);
-                let _ = tx.send(Event::Work(s.work.clone()));
+                let _ = tx.send(Event::Work(Box::new(s.work.clone())));
                 let subject = args["path"]
                     .as_str()
                     .or(args["command"].as_str())
@@ -656,6 +704,41 @@ fn demo_response(
     thread::sleep(Duration::from_millis(350));
     if cancel.load(Ordering::Relaxed) {
         bail!("Stopped by you")
+    }
+    if prompt.starts_with("command demo") {
+        if turn == 0 {
+            let (command, timeout) = if prompt.contains("timeout") {
+                (
+                    "printf 'command started\\n'; sleep 10; printf 'should not finish\\n'",
+                    1,
+                )
+            } else if prompt.contains("stop") {
+                (
+                    "printf 'command started\\n'; sleep 10; printf 'should not finish\\n'",
+                    20,
+                )
+            } else {
+                (
+                    "printf 'phase one\\n'; sleep 2; printf 'phase two\\n'; printf 'fixture failure\\n' >&2; exit 7",
+                    10,
+                )
+            };
+            return Ok(
+                json!({"content":[{"type":"tool_use","id":"command-demo","name":"shell","input":{"command":command,"timeout_secs":timeout}}],"stop_reason":"tool_use","usage":{}}),
+            );
+        }
+        let passed = messages
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter(|b| b["type"] == "tool_result")
+            .filter_map(|b| b["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .next_back()
+            .is_some_and(|r| r["passed"] == true);
+        return Ok(
+            json!({"content":[{"type":"text","text":if passed {"The command finished with exit 0. F4 shows the actual output."} else {"The command did not complete successfully. F4 shows the actual output; /recover starts a new investigation."}}],"stop_reason":"end_turn","usage":{}}),
+        );
     }
     if prompt.contains("steering demo") {
         let updated = messages
@@ -945,6 +1028,44 @@ mod integration_tests {
         );
         assert_eq!(s.work.skills, ["fixture"]);
         assert_eq!(s.work.context_files, ["source.txt:2"]);
+    }
+    #[test]
+    fn direct_command_needs_no_key_and_does_not_consume_steering() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = config(d.path());
+        let mut session = Session::new(cfg.project.clone(), cfg.model.clone(), false);
+        let (tx, _) = crossbeam_channel::unbounded();
+        session = turn(
+            session,
+            "/run printf '@literal'",
+            &cfg,
+            "allow",
+            &tx,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(session.status, "done");
+        assert_eq!(session.work.model_requests, 0);
+        assert_eq!(
+            session.work.command.as_ref().unwrap().stdout_tail,
+            "@literal"
+        );
+        let steering = Arc::new(Mutex::new(VecDeque::from([PendingMessage::new(
+            "Do something else".into(),
+            crate::session::Delivery::Steer,
+        )])));
+        let s = turn_with_input(
+            Session::new(cfg.project.clone(), cfg.model.clone(), false),
+            "/run touch stale",
+            &cfg,
+            "allow",
+            &tx,
+            &Arc::new(AtomicBool::new(false)),
+            &steering,
+        );
+        assert_eq!(s.status, "done");
+        assert_eq!(steering.lock().unwrap().len(), 1);
+        assert!(!d.path().join("stale").exists());
+        assert_eq!(s.work.model_requests, 0);
     }
     #[test]
     fn approval_does_not_overwrite_a_concurrent_user_edit() {

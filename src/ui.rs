@@ -60,6 +60,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/build", "Work with file and shell tools"),
     ("/permissions", "ask, allow, or deny actions"),
     ("/check", "Verify a file independently"),
+    ("/run", "Run a local command without a model request"),
+    ("/output", "Watch the latest command output"),
+    ("/recover", "Ask for help with a failed command"),
     ("/work", "Open 弄玉's plan and task evidence"),
     ("/review", "Review the changes made this turn"),
     ("/steer", "Give a new direction during work"),
@@ -361,6 +364,7 @@ impl App {
                 | "/pet"
                 | "/tools"
                 | "/work"
+                | "/output"
                 | "/review"
                 | "/steer"
                 | "/follow"
@@ -385,6 +389,9 @@ impl App {
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
    "/work"=>self.show_work(),
+   "/run"=>{if arg.is_empty(){bail!("Use /run followed by a shell command")};self.submit(format!("/run {arg}"))?;},
+   "/output"=>self.info("Command output · 弄玉",self.session.work.command.as_ref().map(|c|c.summary()).unwrap_or_else(||"No command has run in this turn.\nCommand output appears here while it runs.\nF4 opens this view.".into())),
+   "/recover"=>{let command=self.session.work.command.as_ref().context("No failed command to recover")?;if command.running || (command.exit_code==Some(0)&&!command.stopped&&!command.timed_out){bail!("The latest command has not failed")};let prompt=format!("Help me recover from the latest command failure. Share a concise plan with update_plan. Inspect the actual output and relevant project files, explain the cause supported by evidence, then make a focused fix and run an appropriate check. Do not blindly repeat the same command. Respect my permission settings.\n\n{}",command.summary());self.submit(prompt)?;},
    "/review"=>{let text=if self.session.work.diffs.is_empty(){"No file edits recorded for this turn. Shell changes may require a git diff.\n\n/work shows the plan and actual checks.".into()}else{self.session.work.diffs.iter().map(|(_,d)|d.as_str()).collect::<Vec<_>>().join("\n\n")};self.info("Review changes · 弄玉",text);},
    "/new"|"/clear"=>self.new_session(arg)?,
    "/sessions"|"/resume"=>{if !arg.is_empty(){let s=self.store.load(arg)?;if s.project!=self.cfg.project{bail!("Session belongs to a different project")};self.session=s;self.scroll=0;self.persist()?;}else{self.popup=Some(Popup::Sessions{items:self.store.list(&self.cfg.project)?,query:String::new(),index:0});}},
@@ -403,7 +410,7 @@ impl App {
    "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
    "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
-   "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo"}else{"demo task"}.into())?;},
+   "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 active seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
@@ -638,7 +645,23 @@ impl App {
                         c.motion("listening", &self.mood, true, false);
                     }
                 }
-                Event::Work(work) => self.session.work = work,
+                Event::Work(work) => {
+                    self.session.work = *work;
+                    if let Some(Popup::Info { title, text, .. }) = &mut self.popup {
+                        if title.starts_with("Command output") {
+                            *text = self
+                                .session
+                                .work
+                                .command
+                                .as_ref()
+                                .map(|c| c.summary())
+                                .unwrap_or_default();
+                        }
+                        if title.starts_with("Working together") {
+                            *text = self.session.work.summary();
+                        }
+                    }
+                }
                 Event::Question {
                     question,
                     options,
@@ -706,7 +729,8 @@ impl App {
                     self.session = *session;
                     self.session.pending = pending;
                     if self.session.work.evidence.iter().any(|e| !e.passed) {
-                        self.notice = "A file check failed · /tools to review".into();
+                        self.notice =
+                            "A check or command failed · F4 output · /work details".into();
                         self.reaction = Some(("concerned".into(), Instant::now()));
                     }
                     self.running = None;
@@ -757,6 +781,8 @@ impl App {
             }
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
+        } else if self.session.work.evidence.iter().any(|e| !e.passed) {
+            "concerned"
         } else if let Some((reaction, at)) = &self.reaction {
             if at.elapsed() < Duration::from_secs(3) {
                 reaction
@@ -793,6 +819,10 @@ impl App {
         }
         if key.code == KeyCode::F(2) {
             self.show_work();
+            return Ok(());
+        }
+        if key.code == KeyCode::F(4) {
+            self.command("/output")?;
             return Ok(());
         }
         if key.code == KeyCode::F(3) {
@@ -1347,9 +1377,10 @@ impl App {
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
                     | Popup::Resources { .. }
-            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside"));
+            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output"));
             let side_by_side = decision && pet_width > 0 && chat.width >= 42;
-            if matches!(popup, Popup::Resources { .. }) {
+            if side_by_side {
+                f.render_widget(Clear, chat);
                 f.render_widget(Block::default().style(style(FG)), chat);
             }
             if !side_by_side {
@@ -1476,6 +1507,8 @@ impl App {
             self.session.work.activity.as_str()
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
+        } else if self.session.work.evidence.iter().any(|e| !e.passed) {
+            "a check needs attention"
         } else {
             "here with you"
         };
@@ -1600,9 +1633,35 @@ impl App {
                     DIM
                 },
             ));
-            lines.push(line("", DIM));
+            if let Some(command) = &work.command {
+                let tail = if command.stderr_tail.is_empty() {
+                    &command.stdout_tail
+                } else {
+                    &command.stderr_tail
+                };
+                let last = tail.lines().last().unwrap_or("Waiting for output");
+                lines.push(line(
+                    format!("{:.1}s · {}", command.elapsed_ms as f64 / 1000., last),
+                    DIM,
+                ));
+            } else {
+                lines.push(line("", DIM));
+            }
         }
-        lines.push(line("F2 work  ·  F3 review", JADE));
+        lines.push(line(
+            if let Some(command) = &work.command {
+                if !command.running
+                    && (command.exit_code != Some(0) || command.timed_out || command.stopped)
+                {
+                    "F4 output · /recover"
+                } else {
+                    "F2 work · F4 output"
+                }
+            } else {
+                "F2 work  ·  F3 review"
+            },
+            JADE,
+        ));
         f.render_widget(
             Paragraph::new(lines),
             Rect::new(
@@ -1732,7 +1791,17 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                                 c.motion("listening", &app.mood, true, false)
                             }
                             app.reaction = Some(("listening".into(), Instant::now()));
-                            app.show_work();
+                            if app
+                                .session
+                                .work
+                                .command
+                                .as_ref()
+                                .is_some_and(|c| c.running || c.exit_code != Some(0))
+                            {
+                                app.command("/output")?;
+                            } else {
+                                app.show_work();
+                            }
                         }
                         _ => {}
                     },
@@ -1797,6 +1866,15 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 if s.status == "error" {
                     bail!("Turn ended with an error")
                 };
+                if cli.prompt.as_ref().is_some_and(|p| p.starts_with("/run "))
+                    && !s
+                        .work
+                        .command
+                        .as_ref()
+                        .is_some_and(|c| c.exit_code == Some(0) && !c.stopped && !c.timed_out)
+                {
+                    bail!("Local command did not succeed; inspect its saved output");
+                }
                 return Ok(());
             }
             _ => {}

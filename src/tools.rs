@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -23,7 +23,7 @@ pub fn schemas() -> Value {
      {"name":"search","description":"Find a literal string in project text files. Bounded to 100 matching lines.","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},
      {"name":"write_file","description":"Create or replace a UTF-8 project file. Requires user permission in ask mode. Respect AGENTS.md.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Relative to the project root, such as src/main.rs. Never an absolute path."},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}},
      {"name":"edit_file","description":"Replace one exact, unique old_text occurrence in a UTF-8 project file. Read the file first, include enough context to match once, and preserve unrelated content. Shows a diff for approval and rejects stale edits.","input_schema":{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"],"additionalProperties":false}},
-     {"name":"shell","description":"Run a shell command in the project, with a 30-second timeout and bounded output. Requires explicit permission in ask mode. It is NOT a filesystem sandbox.","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}},
+     {"name":"shell","description":"Run a shell command in the project with streamed output and a bounded timeout (default 30 seconds, maximum 120). Requires explicit permission in ask mode. It is NOT a filesystem sandbox.","input_schema":{"type":"object","properties":{"command":{"type":"string"},"timeout_secs":{"type":"integer","minimum":1,"maximum":120}},"required":["command"],"additionalProperties":false}},
      {"name":"check_file","description":"Independently verify a saved file. kind is exists, contains, text_equals or json_equals. expected is a STRING: serialized JSON for json_equals, literal text for text checks, or empty for exists. A check is not a model opinion.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Relative to the project root, such as src/main.rs. Never an absolute path."},"kind":{"type":"string","enum":["exists","contains","text_equals","json_equals"]},"expected":{"type":"string","description":"For json_equals, a JSON-encoded value as text, e.g. {\"ready\":true}. For exists, use an empty string."}},"required":["path","kind","expected"],"additionalProperties":false}}
     ])
 }
@@ -122,8 +122,9 @@ pub fn mutates(name: &str) -> bool {
 pub fn preview(root: &Path, name: &str, a: &Value) -> String {
     if name == "shell" {
         return format!(
-            "$ {}\n\nRuns in {}. Shell access is not sandboxed.",
+            "$ {}\n\nUp to {} seconds, within the active turn budget.\nRuns in {}. Shell access is not sandboxed.",
             a["command"].as_str().unwrap_or(""),
+            a["timeout_secs"].as_u64().unwrap_or(30),
             root.display()
         );
     }
@@ -169,6 +170,15 @@ pub fn validate(name: &str, a: &Value) -> Result<()> {
     Ok(())
 }
 pub fn execute(root: &Path, name: &str, a: &Value, cancel: &Arc<AtomicBool>) -> Result<Value> {
+    execute_with_progress(root, name, a, cancel, &mut |_| {})
+}
+pub fn execute_with_progress(
+    root: &Path,
+    name: &str,
+    a: &Value,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(&CommandProgress),
+) -> Result<Value> {
     if cancel.load(Ordering::Relaxed) {
         bail!("Stopped");
     }
@@ -257,13 +267,133 @@ pub fn execute(root: &Path, name: &str, a: &Value, cancel: &Arc<AtomicBool>) -> 
                 json!({"path":filename,"kind":kind,"expected":expected,"passed":passed,"detail":if passed{"Independent file check passed"}else{"Independent file check failed"}}),
             )
         }
-        "shell" => shell(root, string(a, "command")?, cancel),
+        "shell" => shell(
+            root,
+            string(a, "command")?,
+            shell_timeout(a)?,
+            cancel,
+            progress,
+        ),
         _ => bail!("Unknown tool"),
     }
 }
-fn shell(root: &Path, command: &str, cancel: &Arc<AtomicBool>) -> Result<Value> {
-    if command.len() > 8000 {
-        bail!("Command is too long")
+pub fn shell_timeout(args: &Value) -> Result<u64> {
+    let timeout = args
+        .get("timeout_secs")
+        .map(|v| v.as_u64().context("timeout_secs must be an integer"))
+        .transpose()?
+        .unwrap_or(30);
+    if !(1..=120).contains(&timeout) {
+        bail!("Command timeout must be 1–120 seconds");
+    }
+    Ok(timeout)
+}
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CommandProgress {
+    pub command: String,
+    pub elapsed_ms: u64,
+    pub timeout_secs: u64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+    pub total_bytes: usize,
+    pub truncated: bool,
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub stopped: bool,
+    pub timed_out: bool,
+}
+impl CommandProgress {
+    pub fn summary(&self) -> String {
+        let status = if self.running {
+            "Running"
+        } else if self.timed_out {
+            "Timed out"
+        } else if self.stopped {
+            "Stopped by you"
+        } else if self.exit_code == Some(0) {
+            "Finished · exit 0"
+        } else {
+            "Failed"
+        };
+        format!(
+            "$ {}\n\n{} · {:.1}s / {}s · {} output bytes\nExit: {}{}\n\nSTDOUT (latest output)\n{}\n\nSTDERR (latest output)\n{}\n\nEsc closes this panel; Esc again stops running work.\nCtrl+G changes direction; a running command finishes first.",
+            self.command,
+            status,
+            self.elapsed_ms as f64 / 1000.,
+            self.timeout_secs,
+            self.total_bytes,
+            self.exit_code.map_or("pending".into(), |c| c.to_string()),
+            if self.truncated {
+                " · full result clipped"
+            } else {
+                ""
+            },
+            self.stdout_tail,
+            self.stderr_tail
+        )
+    }
+}
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+    total: usize,
+}
+impl Capture {
+    fn push(&mut self, chunk: &[u8]) {
+        self.total = self.total.saturating_add(chunk.len());
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > 32_000 {
+            self.bytes.drain(16_000..self.bytes.len() - 16_000);
+        }
+    }
+    fn tail(&self) -> String {
+        String::from_utf8_lossy(&self.bytes[self.bytes.len().saturating_sub(4000)..]).into_owned()
+    }
+    fn text(&self) -> String {
+        if self.total <= 32_000 {
+            String::from_utf8_lossy(&self.bytes).into_owned()
+        } else {
+            format!(
+                "{}\n… [output truncated: first and last 16 KB retained] …\n{}",
+                String::from_utf8_lossy(&self.bytes[..16_000]),
+                String::from_utf8_lossy(&self.bytes[16_000..])
+            )
+        }
+    }
+}
+struct ProcessGroup {
+    child: std::process::Child,
+    cleaned: bool,
+}
+impl ProcessGroup {
+    fn kill(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.cleaned = true;
+    }
+}
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+fn shell(
+    root: &Path,
+    command: &str,
+    timeout_secs: u64,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(&CommandProgress),
+) -> Result<Value> {
+    if command.len() > 8000 || command.trim().is_empty() {
+        bail!("Use a nonempty command up to 8 KB");
     }
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c")
@@ -272,7 +402,6 @@ fn shell(root: &Path, command: &str, cancel: &Arc<AtomicBool>) -> Result<Value> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Do not hand model-generated commands the provider or host service credentials.
     for (key, _) in std::env::vars() {
         let k = key.to_uppercase();
         if k.contains("TOKEN")
@@ -288,47 +417,73 @@ fn shell(root: &Path, command: &str, cancel: &Arc<AtomicBool>) -> Result<Value> 
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn()?;
-    let drain = |mut stream: Box<dyn Read + Send>| {
+    let mut process = ProcessGroup {
+        child: cmd.spawn()?,
+        cleaned: false,
+    };
+    let stdout = Arc::new(Mutex::new(Capture::default()));
+    let stderr = Arc::new(Mutex::new(Capture::default()));
+    let drain = |mut stream: Box<dyn Read + Send>, capture: Arc<Mutex<Capture>>| {
         thread::spawn(move || {
-            let mut kept = vec![];
             let mut buf = [0u8; 4096];
             while let Ok(n) = stream.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
-                let take = n.min(32_000usize.saturating_sub(kept.len()));
-                kept.extend_from_slice(&buf[..take]);
+                capture.lock().unwrap().push(&buf[..n]);
             }
-            String::from_utf8_lossy(&kept).into_owned()
         })
     };
-    let out = drain(Box::new(child.stdout.take().unwrap()));
-    let err = drain(Box::new(child.stderr.take().unwrap()));
+    let out = drain(
+        Box::new(process.child.stdout.take().unwrap()),
+        stdout.clone(),
+    );
+    let err = drain(
+        Box::new(process.child.stderr.take().unwrap()),
+        stderr.clone(),
+    );
     let start = Instant::now();
-    let mut stopped = false;
-    let status = loop {
-        if cancel.load(Ordering::Relaxed) || start.elapsed() > Duration::from_secs(30) {
-            stopped = true;
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            break child.wait()?;
-        }
-        if let Some(s) = child.try_wait()? {
-            break s;
-        }
-        thread::sleep(Duration::from_millis(50));
+    let mut state = CommandProgress {
+        command: command.into(),
+        timeout_secs,
+        running: true,
+        ..Default::default()
     };
-    // Reap background children in this tool's own process group before joining pipe readers.
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
+    let mut updated = start - Duration::from_secs(1);
+    let mut refresh = |state: &mut CommandProgress| {
+        let out = stdout.lock().unwrap();
+        let err = stderr.lock().unwrap();
+        state.elapsed_ms = start.elapsed().as_millis() as u64;
+        state.stdout_tail = out.tail();
+        state.stderr_tail = err.tail();
+        state.total_bytes = out.total.saturating_add(err.total);
+        state.truncated = out.total > 32_000 || err.total > 32_000;
+        progress(state);
+    };
+    let status = loop {
+        if updated.elapsed() >= Duration::from_millis(200) {
+            refresh(&mut state);
+            updated = Instant::now();
+        }
+        if cancel.load(Ordering::Relaxed) || start.elapsed() >= Duration::from_secs(timeout_secs) {
+            state.stopped = cancel.load(Ordering::Relaxed);
+            state.timed_out = !state.stopped;
+            process.kill();
+            break process.child.wait()?;
+        }
+        if let Some(status) = process.child.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(40));
+    };
+    process.kill();
+    let _ = out.join();
+    let _ = err.join();
+    state.running = false;
+    state.exit_code = status.code();
+    refresh(&mut state);
     Ok(
-        json!({"exit_code":status.code(),"stdout":out.join().unwrap_or_default(),"stderr":err.join().unwrap_or_default(),"stopped":stopped,"passed":status.success()&&!stopped}),
+        json!({"command":command,"exit_code":status.code(),"stdout":stdout.lock().unwrap().text(),"stderr":stderr.lock().unwrap().text(),"stopped":state.stopped,"timed_out":state.timed_out,"duration_ms":state.elapsed_ms,"output_bytes":state.total_bytes,"output_truncated":state.truncated,"passed":status.success()&&!state.stopped&&!state.timed_out}),
     )
 }
 #[cfg(test)]
@@ -421,6 +576,77 @@ mod tests {
         assert_eq!(r["exit_code"], 7);
         assert_eq!(r["passed"], false);
         assert_eq!(r["stdout"], "test");
+    }
+    #[test]
+    fn shell_streams_before_exit_and_retains_final_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let mut updates = vec![];
+        let r = execute_with_progress(
+            d.path(),
+            "shell",
+            &json!({"command":"printf early; sleep .3; printf late; printf error >&2; exit 7"}),
+            &Arc::new(AtomicBool::new(false)),
+            &mut |p| updates.push(p.clone()),
+        )
+        .unwrap();
+        assert!(
+            updates
+                .iter()
+                .any(|p| p.running && p.stdout_tail == "early")
+        );
+        assert_eq!(r["stdout"], "earlylate");
+        assert_eq!(r["stderr"], "error");
+        assert_eq!(r["passed"], false);
+        assert_eq!(updates.last().unwrap().exit_code, Some(7));
+        assert!(!updates.last().unwrap().running);
+    }
+    #[test]
+    fn command_timeout_and_user_stop_are_distinct() {
+        let d = tempfile::tempdir().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let r = execute_with_progress(
+            d.path(),
+            "shell",
+            &json!({"command":"printf ready; sleep 10; touch should-not-exist"}),
+            &cancel,
+            &mut |p| {
+                if p.stdout_tail == "ready" {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(r["stopped"], true);
+        assert_eq!(r["timed_out"], false);
+        assert!(!d.path().join("should-not-exist").exists());
+        let r = execute(
+            d.path(),
+            "shell",
+            &json!({"command":"sleep 10; touch should-not-exist","timeout_secs":1}),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(r["timed_out"], true);
+        assert_eq!(r["stopped"], false);
+        assert_eq!(r["passed"], false);
+        assert!(!d.path().join("should-not-exist").exists());
+        assert!(shell_timeout(&json!({"timeout_secs":0})).is_err());
+        assert!(shell_timeout(&json!({"timeout_secs":121})).is_err());
+        assert!(shell_timeout(&json!({"timeout_secs":"30"})).is_err());
+    }
+    #[test]
+    fn large_command_output_retains_its_beginning_and_failure_tail() {
+        let mut capture = Capture::default();
+        capture.push(b"START");
+        for _ in 0..100 {
+            capture.push(&[b'x'; 4096]);
+        }
+        capture.push(b"FINAL FAILURE");
+        assert_eq!(capture.bytes.len(), 32_000);
+        assert!(capture.text().starts_with("START"));
+        assert!(capture.text().contains("output truncated"));
+        assert!(capture.text().ends_with("FINAL FAILURE"));
+        assert!(capture.tail().ends_with("FINAL FAILURE"));
     }
     #[test]
     fn serialized_json_expectations_preserve_types() {

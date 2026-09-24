@@ -32,4 +32,8 @@ Steering at tool boundaries; Ctrl+G to redirect pending decisions; durable follo
 
 A searchable skill/prompt picker beside the model, lazy skill and supporting-file loading, explicit file/range attachments, context inspection and bounded preflight checks. The work card tracks skills and references. Project guidance still applies and resources grant no tool permissions. A live task read a skill reference and an attached line to produce exactly verified JSON.
 
-Next: stronger live command feedback, companion-guided recovery, and renderer startup/resource reliability.
+## Delivered in 0.6
+
+Live command output, explicit stop/timeout/exit states, bounded head-and-tail capture, F4 and portrait-click access, direct local commands without a model request, and user-invoked recovery from failure. The companion keeps the latest output and actual status in her work area. Side panels clear the underlying transcript to avoid stray background text.
+
+Next: renderer resource use and lifecycle, stronger search, and evidence-aware review across task steps.

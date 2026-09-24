@@ -54,6 +54,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/build", "Work with file and shell tools"),
     ("/permissions", "ask, allow, or deny actions"),
     ("/check", "Verify a file independently"),
+    ("/work", "Open 弄玉's plan and task evidence"),
+    ("/review", "Review the changes made this turn"),
     ("/compact", "Archive context; keep recent exchanges"),
     ("/export", "Save a readable transcript"),
     ("/tools", "Expand or collapse tool details"),
@@ -99,6 +101,41 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     }
     result
 }
+fn wrap_prose(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut result = vec![];
+    let mut code = false;
+    for source in clean(text).split('\n') {
+        if source.trim_start().starts_with("```") {
+            code = !code;
+            result.extend(wrap(source, width));
+            continue;
+        }
+        if code || source.starts_with("    ") {
+            result.extend(wrap(source, width));
+            continue;
+        }
+        let mut current = String::new();
+        for word in source.split_inclusive(' ') {
+            if !current.trim().is_empty() && current.width() + word.trim_end().width() > width {
+                result.push(current.trim_end().to_string());
+                current.clear();
+            }
+            for c in word.chars() {
+                let size = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                if current.width() + size > width && !current.is_empty() {
+                    result.push(current.trim_end().to_string());
+                    current.clear();
+                }
+                if c != ' ' || !current.is_empty() {
+                    current.push(c);
+                }
+            }
+        }
+        result.push(current.trim_end().to_string());
+    }
+    result
+}
 
 struct Approval {
     tool: String,
@@ -107,6 +144,12 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    Question {
+        question: String,
+        options: Vec<String>,
+        input: String,
+        answer: crossbeam_channel::Sender<String>,
+    },
     Info {
         title: String,
         text: String,
@@ -137,6 +180,7 @@ pub struct App {
     pub portrait: Shared,
     graphics: Graphics,
     image_area: Rect,
+    work_area: Rect,
     last_image: Option<(u64, Rect)>,
     mood: String,
     state: String,
@@ -196,6 +240,7 @@ impl App {
             portrait: Shared::default(),
             graphics,
             image_area: Rect::default(),
+            work_area: Rect::default(),
             last_image: None,
             mood: "neutral".into(),
             state: "idle".into(),
@@ -210,6 +255,13 @@ impl App {
         self.notice = text.into();
     }
     fn info(&mut self, title: &str, text: impl Into<String>) {
+        if matches!(
+            self.popup,
+            Some(Popup::Approval(_) | Popup::Question { .. })
+        ) {
+            self.notify("Answer or dismiss the pending decision first.");
+            return;
+        }
         self.popup = Some(Popup::Info {
             title: title.into(),
             text: text.into(),
@@ -224,6 +276,18 @@ impl App {
         self.input = text.into();
         self.cursor = self.input.len();
         self.selection = 0;
+    }
+    fn paste(&mut self, text: &str) {
+        let text = clean(text);
+        if let Some(Popup::Question { input, .. }) = &mut self.popup {
+            if input.len() + text.len() <= 2000 {
+                input.push_str(&text);
+            }
+        } else if self.popup.is_none() && self.input.len() + text.len() <= 32_000 {
+            self.input.insert_str(self.cursor, &text);
+            self.cursor += text.len();
+            self.last_type = Instant::now();
+        }
     }
     fn suggestions(&self) -> Vec<(&'static str, &'static str)> {
         let input = self.input.trim();
@@ -274,11 +338,15 @@ impl App {
                 | "/look"
                 | "/pet"
                 | "/tools"
+                | "/work"
+                | "/review"
         ) && self.busy_guard()
         {
             return Ok(());
         }
         match cmd {
+   "/work"=>self.show_work(),
+   "/review"=>{let text=if self.session.work.diffs.is_empty(){"No file edits recorded for this turn. Shell changes may require a git diff.\n\n/work shows the plan and actual checks.".into()}else{self.session.work.diffs.iter().map(|(_,d)|d.as_str()).collect::<Vec<_>>().join("\n\n")};self.info("Review changes · 弄玉",text);},
    "/new"|"/clear"=>self.new_session(arg)?,
    "/sessions"|"/resume"=>{if !arg.is_empty(){let s=self.store.load(arg)?;if s.project!=self.cfg.project{bail!("Session belongs to a different project")};self.session=s;self.scroll=0;self.persist()?;}else{self.popup=Some(Popup::Sessions{items:self.store.list(&self.cfg.project)?,query:String::new(),index:0});}},
    "/rename"=>{if arg.is_empty(){bail!("Use /rename followed by a title")};self.session.title=arg.chars().take(120).collect();self.session.updated=chrono::Utc::now().to_rfc3339();self.persist()?;},
@@ -289,14 +357,14 @@ impl App {
    "/plan"=>{self.session.mode="plan".into();self.persist()?;self.notify("Plan mode · read and discuss, no writes or shell commands");},
    "/build"=>{self.session.mode="build".into();self.persist()?;self.notify("Build mode · tools follow your permission setting");},
    "/permissions"=>{if !matches!(arg,"ask"|"allow"|"deny"){bail!("Use /permissions ask, allow, or deny")};self.cli.permissions=arg.into();self.notify(format!("Permissions: {arg} · applies to file writes and shell commands"));},
-   "/check"=>{let (path,expected)=arg.split_once(' ').map(|(a,b)|(a,Some(b))).unwrap_or((arg,None));if path.is_empty(){bail!("Use /check path [expected JSON]")};let (kind,value)=if let Some(json)=expected{{serde_json::from_str::<Value>(json)?;("json_equals",json!(json))}}else{("exists",json!(""))};let result=tools::execute(&self.cfg.project,"check_file",&json!({"path":path,"kind":kind,"expected":value}),&Arc::new(AtomicBool::new(false)))?;self.session.checks.push(serde_json::from_value(result.clone())?);self.session.add("tool",format!("check_file  {path} · {}\n{result}",if result["passed"]==true{"verified"}else{"check failed"}));self.reaction=Some((if result["passed"]==true{"pleased"}else{"concerned"}.into(),Instant::now()));self.persist()?;},
+   "/check"=>{let (path,expected)=arg.split_once(' ').map(|(a,b)|(a,Some(b))).unwrap_or((arg,None));if path.is_empty(){bail!("Use /check path [expected JSON]")};let (kind,value)=if let Some(json)=expected{{serde_json::from_str::<Value>(json)?;("json_equals",json!(json))}}else{("exists",json!(""))};let result=tools::execute(&self.cfg.project,"check_file",&json!({"path":path,"kind":kind,"expected":value}),&Arc::new(AtomicBool::new(false)))?;self.session.checks.push(serde_json::from_value(result.clone())?);if self.session.work.goal.is_empty(){self.session.work=crate::work::Work::begin(&format!("Check {path}"));}self.session.work.record("check_file",&json!({"path":path}),&result,false);self.session.add("tool",format!("check_file  {path} · {}\n{result}",if result["passed"]==true{"verified"}else{"check failed"}));self.reaction=Some((if result["passed"]==true{"pleased"}else{"concerned"}.into(),Instant::now()));self.persist()?;},
    "/compact"=>self.compact()?,
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
    "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
    "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
-   "/demo"=>{self.session.demo=true;self.submit("demo task".into())?;},
+   "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo"}else{"demo task"}.into())?;},
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
@@ -355,6 +423,17 @@ impl App {
         );
         Ok(())
     }
+    fn show_work(&mut self) {
+        let text = if self.session.work.goal.is_empty() {
+            "Tell me the task and I will keep its plan, changes and evidence here.\n\n/plan       discuss and inspect\n/build      make changes with tools\n/review     inspect this turn's edits\n/check      independently verify a file\n\nDuring work, approvals and questions appear beside me. F2 opens this card; Esc stops ongoing work.".into()
+        } else {
+            format!(
+                "{}\nF3 /review · inspect edits\nEsc closes this card · Esc again stops work",
+                self.session.work.summary()
+            )
+        };
+        self.info("Working together · 弄玉", text);
+    }
     fn submit(&mut self, prompt: String) -> Result<()> {
         if self.busy_guard() {
             return Ok(());
@@ -371,6 +450,7 @@ impl App {
             .messages
             .push(json!({"role":"user","content":prompt}));
         self.session.status = "thinking".into();
+        self.session.work = crate::work::Work::begin(&prompt);
         self.persist()?;
         self.running = Some(agent::spawn(
             before,
@@ -408,6 +488,21 @@ impl App {
             .unwrap_or_default();
         for event in events {
             match event {
+                Event::Work(work) => self.session.work = work,
+                Event::Question {
+                    question,
+                    options,
+                    answer,
+                } => {
+                    self.state = "waiting".into();
+                    self.popup = Some(Popup::Question {
+                        question,
+                        options,
+                        input: String::new(),
+                        answer,
+                    });
+                    self.last_image = None;
+                }
                 Event::Delta(text) => {
                     self.state = "speaking".into();
                     self.stream.push_str(&text);
@@ -440,8 +535,9 @@ impl App {
                     self.persist()?;
                 }
                 Event::Finished(session) => {
-                    let happy =
-                        session.status == "done" && session.checks.last().is_some_and(|c| c.passed);
+                    let happy = session.status == "done"
+                        && !session.work.evidence.is_empty()
+                        && session.work.evidence.iter().all(|e| e.passed);
                     self.reaction = Some((
                         if happy {
                             "pleased"
@@ -454,14 +550,17 @@ impl App {
                         Instant::now(),
                     ));
                     self.session = *session;
-                    if self.session.checks.last().is_some_and(|c| !c.passed) {
+                    if self.session.work.evidence.iter().any(|e| !e.passed) {
                         self.notice = "A file check failed · /tools to review".into();
                         self.reaction = Some(("concerned".into(), Instant::now()));
                     }
                     self.running = None;
                     self.stream.clear();
                     self.state = "idle".into();
-                    if matches!(self.popup, Some(Popup::Approval(_))) {
+                    if matches!(
+                        self.popup,
+                        Some(Popup::Approval(_) | Popup::Question { .. })
+                    ) {
                         self.popup = None
                     }
                     self.persist()?;
@@ -483,8 +582,17 @@ impl App {
             self.persist()?;
             self.quit = true;
         }
-        let state = if self.running.is_some() {
-            self.state.as_str()
+        let state = if !self.session.work.waiting.is_empty() && self.running.is_some() {
+            "waiting"
+        } else if self.running.is_some() {
+            if self.state == "working" && self.session.work.activity == "Checking the result" {
+                "checking"
+            } else if self.state == "working" && self.session.work.activity == "Reading the project"
+            {
+                "reading"
+            } else {
+                self.state.as_str()
+            }
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
         } else if let Some((reaction, at)) = &self.reaction {
@@ -510,8 +618,53 @@ impl App {
             self.request_quit();
             return Ok(());
         }
+        if key.code == KeyCode::F(2) {
+            self.show_work();
+            return Ok(());
+        }
+        if key.code == KeyCode::F(3) {
+            self.command("/review")?;
+            return Ok(());
+        }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::Question {
+                    question,
+                    options,
+                    mut input,
+                    answer,
+                } => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            let _ = answer.send(String::new());
+                            return Ok(());
+                        }
+                        KeyCode::Enter if !input.trim().is_empty() => {
+                            let _ = answer.send(input.trim().into());
+                            return Ok(());
+                        }
+                        KeyCode::Char(c)
+                            if input.is_empty()
+                                && c.is_ascii_digit()
+                                && c != '0'
+                                && (c as usize - '1' as usize) < options.len() =>
+                        {
+                            let _ = answer.send(options[c as usize - '1' as usize].clone());
+                            return Ok(());
+                        }
+                        KeyCode::Char(c) if input.len() < 2000 => input.push(c),
+                        KeyCode::Backspace => {
+                            input.pop();
+                        }
+                        _ => {}
+                    }
+                    self.popup = Some(Popup::Question {
+                        question,
+                        options,
+                        input,
+                        answer,
+                    });
+                }
                 Popup::Approval(mut a) => match key.code {
                     KeyCode::Down | KeyCode::PageDown => {
                         a.scroll = a.scroll.saturating_add(5);
@@ -724,6 +877,7 @@ impl App {
         let all = f.area();
         f.render_widget(Block::default().style(style(FG)), all);
         self.image_area = Rect::default();
+        self.work_area = Rect::default();
         if all.width < 45 || all.height < 12 {
             f.render_widget(
                 Paragraph::new("Aster needs at least 45 × 12 cells.").style(style(DIM)),
@@ -866,7 +1020,7 @@ impl App {
             );
         }
         let bottom = if self.notice.is_empty() {
-            "↵ send   / commands   Ctrl+P sessions   Esc stop   Ctrl+C quit".into()
+            "↵ send   / commands   F2 work   F3 review   Ctrl+P sessions   Esc stop".into()
         } else {
             clean(&self.notice)
         };
@@ -910,8 +1064,25 @@ impl App {
             }
         }
         if let Some(popup) = &self.popup {
-            self.image_area = Rect::default();
-            Self::draw_popup(f, popup, area);
+            let decision = matches!(popup, Popup::Approval(_) | Popup::Question { .. });
+            let side_by_side = decision && pet_width > 0 && chat.width >= 42;
+            if !side_by_side {
+                self.image_area = Rect::default();
+            }
+            Self::draw_popup(
+                f,
+                popup,
+                if side_by_side {
+                    Rect::new(
+                        chat.x,
+                        area.y + 2,
+                        chat.width,
+                        area.height.saturating_sub(7),
+                    )
+                } else {
+                    area
+                },
+            );
         }
     }
     fn welcome(&self, f: &mut Frame, r: Rect) {
@@ -952,6 +1123,12 @@ impl App {
             });
         }
         for e in entries {
+            if e.role == "tool"
+                && !self.show_tools
+                && (e.text.starts_with("update_plan ") || e.text.starts_with("ask_user "))
+            {
+                continue;
+            }
             let (label, color) = match e.role.as_str() {
                 "you" => ("YOU", DIM),
                 "nongyu" => ("弄玉", JADE),
@@ -974,7 +1151,7 @@ impl App {
                 continue;
             }
             lines.push(line(label, color));
-            for text in wrap(&e.text, width) {
+            for text in wrap_prose(&e.text, width) {
                 lines.push(line(
                     format!("  {text}"),
                     if e.role == "notice" { GOLD } else { FG },
@@ -1007,8 +1184,10 @@ impl App {
             Paragraph::new("弄玉").style(style(FG).add_modifier(Modifier::BOLD)),
             Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), 1),
         );
-        let state = if self.running.is_some() {
-            self.state.as_str()
+        let state = if self.running.is_some() && !self.session.work.waiting.is_empty() {
+            "your decision"
+        } else if self.running.is_some() {
+            self.session.work.activity.as_str()
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
         } else {
@@ -1023,7 +1202,16 @@ impl App {
                 1,
             ),
         );
-        let height = r.height.saturating_sub(if compact { 3 } else { 7 });
+        let card_height = if r.height >= 24 {
+            8
+        } else if r.height >= 16 {
+            4
+        } else {
+            1
+        };
+        let height = r
+            .height
+            .saturating_sub(if compact { 3 } else { 5 } + card_height);
         let width = r.width.min((f64::from(height) * 1.36) as u16);
         let height = height.min((f64::from(width) / 1.36) as u16);
         let area = Rect::new(
@@ -1049,17 +1237,86 @@ impl App {
                 area,
             );
         }
-        if !compact {
-            let caption = if self.portrait.frame.is_some() {
-                "LIVE2D  ·  /mood  /look"
+        self.work_area = Rect::new(
+            r.x,
+            r.bottom().saturating_sub(card_height),
+            r.width,
+            card_height,
+        );
+        let work = &self.session.work;
+        let mut lines = vec![];
+        if card_height >= 8 {
+            lines.push(line(
+                if work.waiting.is_empty() {
+                    "WORKING TOGETHER"
+                } else {
+                    "YOUR DECISION"
+                },
+                JADE,
+            ));
+            let focus = if !work.waiting.is_empty() {
+                work.waiting.clone()
+            } else if let Some(step) = work
+                .steps
+                .iter()
+                .find(|s| s.status == crate::work::StepStatus::Doing)
+            {
+                format!("› {}", step.title)
+            } else if !work.focus.is_empty() {
+                work.focus.clone()
+            } else if !work.goal.is_empty() {
+                work.goal.clone()
             } else {
-                "Your model. Your companion."
+                "Choose a task. I'll track the steps and checks here.".into()
             };
-            f.render_widget(
-                Paragraph::new(caption).style(style(DIM)),
-                Rect::new(r.x + 1, r.bottom() - 1, r.width.saturating_sub(2), 1),
-            );
+            for text in wrap_prose(&focus, r.width.saturating_sub(2) as usize)
+                .into_iter()
+                .take(2)
+            {
+                lines.push(line(text, FG));
+            }
+            lines.push(line("", DIM));
+            if !work.steps.is_empty() {
+                lines.push(line(
+                    format!(
+                        "{}/{} steps · {} {}",
+                        work.steps
+                            .iter()
+                            .filter(|s| s.status == crate::work::StepStatus::Done)
+                            .count(),
+                        work.steps.len(),
+                        work.changed.len(),
+                        if work.changed.len() == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        }
+                    ),
+                    DIM,
+                ));
+            }
         }
+        if card_height >= 4 {
+            lines.push(line(
+                work.verdict(),
+                if work.evidence.iter().any(|e| !e.passed) {
+                    GOLD
+                } else {
+                    DIM
+                },
+            ));
+            lines.push(line("", DIM));
+        }
+        lines.push(line("F2 work  ·  F3 review", JADE));
+        f.render_widget(
+            Paragraph::new(lines),
+            Rect::new(
+                self.work_area.x + 1,
+                self.work_area.y,
+                self.work_area.width.saturating_sub(2),
+                self.work_area.height,
+            ),
+        );
     }
     fn draw_popup(f: &mut Frame, p: &Popup, area: Rect) {
         let width = area.width.saturating_sub(4).min(88);
@@ -1083,6 +1340,7 @@ impl App {
             vertical: 2,
         });
         let (title,text,scroll)=match p{
+   Popup::Question{question,options,input,..}=>("弄玉 · a question for you".into(),format!("{}\n\n{}\n\nOr type an answer:\n› {}",question,options.iter().enumerate().map(|(i,o)|format!("[{}] {o}",i+1)).collect::<Vec<_>>().join("\n"),input),0),
    Popup::Info{title,text,scroll}=>(title.clone(),text.clone(),*scroll),
    Popup::Approval(a)=>(format!("Allow {}?",a.tool),a.preview.clone(),a.scroll),
    Popup::Delete=>("Delete this conversation?".into(),"The saved conversation will be removed.\nProject files stay in place.\n\n[y] delete    [n] keep    Esc cancels".into(),0),
@@ -1107,6 +1365,12 @@ impl App {
         if matches!(p, Popup::Approval(_)) {
             f.render_widget(
                 Paragraph::new("y allow once · n deny · ↑↓ review · Esc cancel").style(style(GOLD)),
+                Rect::new(inner.x, inner.bottom(), inner.width, 1),
+            );
+        }
+        if matches!(p, Popup::Question { .. }) {
+            f.render_widget(
+                Paragraph::new("1–5 choose · Enter send · Esc dismiss").style(style(GOLD)),
                 Rect::new(inner.x, inner.bottom(), inner.width, 1),
             );
         }
@@ -1147,12 +1411,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         }
                     }
                     TermEvent::Paste(text) => {
-                        let text = clean(&text);
-                        if app.input.len() + text.len() <= 32_000 {
-                            app.input.insert_str(app.cursor, &text);
-                            app.cursor += text.len();
-                            app.last_type = Instant::now();
-                        }
+                        app.paste(&text);
                     }
                     TermEvent::Resize(_, _) => {
                         print!("{}", app.graphics.clear());
@@ -1163,12 +1422,14 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         MouseEventKind::ScrollUp => app.scroll += 3,
                         MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
                         MouseEventKind::Down(_)
-                            if app.image_area.contains((mouse.column, mouse.row).into()) =>
+                            if app.image_area.contains((mouse.column, mouse.row).into())
+                                || app.work_area.contains((mouse.column, mouse.row).into()) =>
                         {
                             if let Some(c) = &app.companion {
                                 c.motion("listening", &app.mood, true, false)
                             }
                             app.reaction = Some(("listening".into(), Instant::now()));
+                            app.show_work();
                         }
                         _ => {}
                     },
@@ -1218,6 +1479,10 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 eprintln!(
                     "Action declined: headless mode cannot ask. Use --permissions allow for explicitly authorized actions."
                 );
+            }
+            Event::Question { answer, .. } => {
+                let _ = answer.send(String::new());
+                eprintln!("Question unanswered: interactive input is needed.");
             }
             Event::Checkpoint(s) => store.save(&s)?,
             Event::Finished(s) => {
@@ -1312,6 +1577,22 @@ pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()
 mod tests {
     use super::*;
     #[test]
+    fn prose_wrap_preserves_words_and_code_indentation() {
+        assert_eq!(
+            wrap_prose("A focused edit preserves the file.", 15),
+            vec!["A focused edit", "preserves the", "file."]
+        );
+        assert!(
+            wrap_prose("你好，Aster。一起检查结果。", 12)
+                .iter()
+                .all(|s| s.width() <= 12)
+        );
+        assert_eq!(
+            wrap_prose("```rust\n    let x = 2;\n```", 30),
+            vec!["```rust", "    let x = 2;", "```"]
+        );
+    }
+    #[test]
     fn unicode_wrap_and_escape_sanitization() {
         assert_eq!(wrap("你好世界", 4), vec!["你好", "世界"]);
         assert!(!clean("bad\x1b[31m").contains('\x1b'));
@@ -1338,6 +1619,24 @@ mod layout_tests {
         App::new(cfg, cli, store).unwrap()
     }
     use clap::Parser;
+    #[test]
+    fn pasted_question_answer_keeps_the_composer_draft() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.input_set("Keep my draft");
+        let (answer, rx) = crossbeam_channel::bounded(1);
+        a.popup = Some(Popup::Question {
+            question: "Which language?".into(),
+            options: vec![],
+            input: String::new(),
+            answer,
+        });
+        a.paste("中文");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(rx.recv().unwrap(), "中文");
+        assert_eq!(a.input, "Keep my draft");
+    }
     #[test]
     fn renders_compact_wide_and_popups() {
         let d = tempfile::tempdir().unwrap();

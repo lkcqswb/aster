@@ -1,3 +1,14 @@
+# Companion workbench 0.3 — 2026-09-24
+
+- **27 Rust tests passed**, including precise edits, ambiguous/stale edit rejection, paginated reads, a concurrent user edit during approval, question answers and paste handling, plan/evidence separation, prose/code wrapping and existing tool boundaries. Formatting, Clippy with warnings denied, and the release build passed.
+- The companion PTY workflow chose a Chinese greeting, approved creation and a precise edit, verified exact saved JSON, reviewed the three-step plan and both diffs, resized the terminal, and exited cleanly. The final run captured **36 distinct native image frames**, including while questions and approvals were visible beside the character. Evidence: `.aster/qa/companion-work-e2e.json`.
+- The broader terminal workflow and the startup recovery test passed. A simulated browser failure exhausts the single automatic local startup retry, then `/pet retry` recovers and produces distinct frames. This does not retry provider API calls.
+- A real **MiniMax-M2.7** coding task, session `1b4247346c78`, read a broken Python function and its tests, shared a plan, made an approved `edit_file` change, and ran the approved test command. All **three unchanged tests passed**, and a separate local rerun also passed. Usage: **7 model turns, 9 tools, 4,688 input tokens, 696 output tokens**. One live task was invoked; no provider retry was made. Evidence: `.aster/qa/agent-edit-live.json`.
+- The actual draw function and model frame were rendered for visual QA in `.aster/qa/aster-work.svg` and `.aster/qa/aster-work.png`. This caught and corrected mid-word text wrapping and an internal tool name appearing as the companion's focus. The work card now shows task evidence and the relevant file.
+- Some development renderer launches timed out while loading the model/textures. Diagnostics distinguish that stage; another fresh probe and the final terminal runs succeeded. An orphan from a previously closed Aster was also found and stopped. These observations do not establish a single root cause for every timeout. The local renderer now has one bounded startup retry and retains the first failure in its diagnostics.
+
+---
+
 # Live2D startup recovery — 2026-09-24
 
 Aster 0.2.1 adds explicit loading stages, browser-exit detection, private diagnostic records, and `/pet retry`. The renderer bypasses proxy settings for its loopback asset connection. A renderer worker failure is reported instead of leaving the initial loading message indefinitely.

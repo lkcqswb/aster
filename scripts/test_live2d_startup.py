@@ -25,8 +25,9 @@ def main():
         wrapper = temp / "chrome"
         wrapper.write_text(
             "#!/bin/sh\n"
-            f"if [ ! -e {shlex.quote(str(marker))} ]; then\n"
-            f"  touch {shlex.quote(str(marker))}\n"
+            f"count=0; [ ! -e {shlex.quote(str(marker))} ] || count=$(cat {shlex.quote(str(marker))})\n"
+            f"if [ \"$count\" -lt 2 ]; then\n"
+            f"  echo $((count + 1)) > {shlex.quote(str(marker))}\n"
             "  echo 'simulated renderer startup failure' >&2\n  exit 7\nfi\n"
             f"exec {shlex.quote(CHROME)} \"$@\"\n"
         )
@@ -95,7 +96,7 @@ def main():
             assert child.exitstatus == 0
             evidence = {
                 "startup_failure_visible": True, "diagnostics_saved": True,
-                "retry_recovered": True, "distinct_inline_frames": len(frames),
+                "automatic_startup_retry_bounded": True, "retry_recovered": True, "distinct_inline_frames": len(frames),
                 "textures": 9, "exit": child.exitstatus, "api_calls": 0,
             }
             qa = ROOT / ".aster/qa"

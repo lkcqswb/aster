@@ -6,6 +6,8 @@ Aster is written in Rust. The interface is a conversation: type a request, watch
 
 Inspired by the conversational flow of [Claude Code](https://code.claude.com/docs/en/interactive-mode) and the [sessions and slash commands in OpenCode](https://opencode.ai/docs/tui/). See [design notes](docs/DESIGN.md) for the decisions and references.
 
+The agent runtime is evolving toward [Pi's event-driven tools and extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md). Aster now supports precise file edits, structured work plans, questions during a task, and a companion work card backed by actual tool results. See the [delivery plan](docs/EVOLUTION.md).
+
 ## Start
 
 Requires a stable Rust toolchain. Live2D additionally uses Chrome/Chromium and local model assets; the agent works without them.
@@ -44,6 +46,10 @@ The companion pane is part of the terminal layout, not a separate window. iTerm2
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
+Her work card tracks the active plan step, file or command, pending decision, and recorded checks. Click her portrait or press **F2** to inspect the plan and evidence. **F3** reviews the exact file diffs from this turn. Questions and approval prompts stay beside her in a wide terminal, so she remains visible while you decide. Use `/demo work` to try the entire choice → approval → edit → verification flow without an API call.
+
+Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
+
 Speaking motion follows text activity. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
 
 By default Aster reads existing assets here:
@@ -67,6 +73,8 @@ A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SD
 
 Startup diagnostics are saved privately in `~/.local/share/aster/diagnostics/live2d.json` (or under your selected `--state-dir`). This is a record of the latest startup or error transition, not a continuously updated frame counter. It contains no conversation or provider key. Renderer traffic stays on loopback and bypasses proxy settings. Browser stderr is retained only in its temporary profile, with a bounded excerpt included when startup fails.
 
+The local renderer makes at most one automatic retry after a startup failure. Missing model/Chrome paths fail immediately; provider API requests never retry automatically.
+
 ## Conversations and commands
 
 Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` opens the session picker. `Esc` closes a panel or stops the current turn. `Ctrl+J` adds a line; Enter sends. Page Up/Down scroll the conversation. `Ctrl+T` expands tool details. `Ctrl+C` saves and exits.
@@ -86,6 +94,8 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/permissions ask\|allow\|deny` | Control file-write and shell approval |
 | `/model live\|demo\|NAME` | Select MiniMax, the offline demo, or a model name |
 | `/check FILE [JSON]` | Check existence, or compare saved JSON with an expected value |
+| `/work` | Inspect the current task plan, files and independent evidence |
+| `/review` | Review diffs from file tools in this turn |
 | `/tools` | Expand or collapse tool output |
 | `/mood`, `/look`, `/pet` | Interact with the character |
 | `/demo` | Run a scripted, real file-write and verification example |
@@ -99,7 +109,9 @@ Sessions live in `~/.local/share/aster`, with private files, atomic writes and a
 
 Aster loads `~/.config/aster/AGENTS.md`, followed by ancestor `AGENTS.md` files from broad to narrow scope. Use `/agents` to see exactly which files were included. When a file tool reaches a nested directory with new guidance, that guidance is returned to the model before the operation is retried. Instruction loading is bounded by file size.
 
-The tools are `list_files`, `read_file`, `search`, `write_file`, `shell` and `check_file`. File tools reject path traversal, symlinks and credential/private directories. Reads and writes are capped at 128 KB, file lists at 800 entries and searches at 100 matching lines.
+The tools are `list_files`, `read_file`, `search`, `write_file`, `edit_file`, `shell`, `check_file`, `update_plan` and `ask_user`. File tools reject path traversal, symlinks and credential/private directories. Reads and writes are capped at 128 KB, file lists at 800 entries and searches at 100 matching lines. `read_file` returns numbered lines, with a one-based offset and up to 500 lines per call (200 by default).
+
+`edit_file` replaces a single exact occurrence and rejects ambiguous matches. File edits are prepared before approval, displayed as a diff, and committed atomically only if the file still matches the reviewed version. Intervening user edits are preserved. `update_plan` reports progress; it cannot manufacture verification evidence. `ask_user` waits for a numbered choice or a typed answer, and returns that answer to the model before dependent work continues.
 
 By default each write or shell command is shown for approval. `y` allows that action once; `n` or Escape declines it. Plan mode forbids writes and shell commands regardless of the approval setting. **Approved shell commands run as your user and are not a filesystem sandbox.** Credential environment variables are removed from their environment. Commands have a 30-second timeout, bounded captured output and process-group cancellation.
 
@@ -141,6 +153,7 @@ The optional real-PTY test driver uses the existing development-only Python test
 .venv/bin/python scripts/test_rust_e2e.py
 .venv/bin/python scripts/test_rust_e2e.py --live2d
 .venv/bin/python scripts/test_live2d_startup.py
+.venv/bin/python scripts/test_companion_work.py
 ```
 
 To validate the real model independently and save distinct animation frames:
@@ -151,5 +164,7 @@ aster --screenshot .aster/qa/workbench.svg
 ```
 
 The main test driver uses demo mode and makes no API calls. `.venv/bin/python scripts/test_rust_live.py` explicitly runs one bounded real MiniMax task through the TUI, approves its expected file write, and checks the result. Local QA assets are ignored by Git. [Validation results](VALIDATION.md) distinguish automated tests, actual renderer checks and live-model results.
+
+`.venv/bin/python scripts/test_agent_edit_live.py --run-live` explicitly runs a real coding task: inspect a broken Python function and its tests, make a precise approved edit, run the approved test command, then independently rerun the unchanged tests. It makes one bounded user turn and never retries a failed provider request.
 
 The prior Python prototype is retained as historical source; its instructions are in [legacy documentation](docs/legacy-prototype.md). It is not used by the `aster` command.

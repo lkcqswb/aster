@@ -60,22 +60,43 @@ impl Companion {
         let sh = shared.clone();
         let st = stop.clone();
         let handle = thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                render_loop(&cfg, &sh, &st)
-            }));
-            let error = match result {
-                Ok(Ok(())) => None,
-                Ok(Err(e)) => Some(format!("{e:#}")),
-                Err(_) => Some("The renderer worker stopped unexpectedly".into()),
-            };
-            if let Some(error) = error {
-                let phase = sh.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
-                report(
-                    &cfg,
-                    &sh,
-                    &format!("Live2D unavailable: {error}\n/pet retry · /status details"),
-                    Some(&phase),
-                );
+            for attempt in 1..=2 {
+                sh.lock().unwrap_or_else(|e| e.into_inner()).info["attempt"] = json!(attempt);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    render_loop(&cfg, &sh, &st)
+                }));
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(format!("{e:#}")),
+                    Err(_) => Some("The renderer worker stopped unexpectedly".into()),
+                };
+                if let Some(error) = error {
+                    let phase = sh.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
+                    let retry = attempt == 1
+                        && !st.load(Ordering::Relaxed)
+                        && sh.lock().unwrap_or_else(|e| e.into_inner()).frames == 0
+                        && phase != "Finding her model…";
+                    if retry {
+                        sh.lock().unwrap_or_else(|e| e.into_inner()).info["first_startup_error"] =
+                            json!(crate::tools::clip(&error, 2000));
+                        report(
+                            &cfg,
+                            &sh,
+                            "Restarting her renderer after a startup failure…",
+                            Some(&phase),
+                        );
+                        thread::sleep(Duration::from_millis(300));
+                        continue;
+                    }
+                    sh.lock().unwrap_or_else(|e| e.into_inner()).frame = None;
+                    report(
+                        &cfg,
+                        &sh,
+                        &format!("Live2D unavailable: {error}\n/pet retry · /status details"),
+                        Some(&phase),
+                    );
+                }
+                break;
             }
         });
         Self {
@@ -415,10 +436,17 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
             return Ok(());
         }
         let value = cdp.evaluate(
-            "({ready:window.asterReady,error:window.asterError,info:window.asterInfo})",
+            "({ready:window.asterReady,error:window.asterError,info:window.asterInfo,stage:window.asterStage,document:document.readyState})",
         )?;
         if value["ready"] == true {
-            shared.lock().unwrap().info = value["info"].clone();
+            {
+                let mut s = shared.lock().unwrap();
+                if let Some(info) = value["info"].as_object() {
+                    for (key, value) in info {
+                        s.info[key] = value.clone();
+                    }
+                }
+            }
             report(cfg, shared, "Drawing her first frame…", None);
             break;
         }
@@ -426,7 +454,10 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
             bail!("{e}")
         }
         if started.elapsed() > Duration::from_secs(60) {
-            bail!("Model loading timed out. {}", browser.diagnostic())
+            bail!(
+                "Model loading timed out ({value}). {}",
+                browser.diagnostic()
+            )
         };
         thread::sleep(Duration::from_millis(120));
     }

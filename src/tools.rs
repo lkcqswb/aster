@@ -15,10 +15,13 @@ use std::{
 
 pub fn schemas() -> Value {
     json!([
+     {"name":"update_plan","description":"Share or update a concise work plan for a multi-step task. One step may be doing. Marking a step done is a progress statement, never verification evidence.","input_schema":{"type":"object","properties":{"steps":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{"title":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","blocked"]}},"required":["title","status"],"additionalProperties":false}}},"required":["steps"],"additionalProperties":false}},
+     {"name":"ask_user","description":"Ask one necessary, actionable question during work. Provide 2–5 short options when useful; the user may instead write an answer. Wait for the answer before dependent work. Do not use this for tool approvals.","input_schema":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","maxItems":5,"items":{"type":"string"}}},"required":["question","options"],"additionalProperties":false}},
      {"name":"list_files","description":"List project files, excluding credentials and generated/private directories.","input_schema":{"type":"object","properties":{},"additionalProperties":false}},
-     {"name":"read_file","description":"Read a UTF-8 project file, up to 128 KB. Nested AGENTS.md guidance is provided before file access.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Relative to the project root, such as src/main.rs. Never an absolute path."}},"required":["path"],"additionalProperties":false}},
+     {"name":"read_file","description":"Read a UTF-8 project file with line numbers. offset is a one-based line; limit is 1–500 lines (default 200). Use next_offset to continue. Nested AGENTS.md guidance is provided before access.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the project root."},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":500}},"required":["path"],"additionalProperties":false}},
      {"name":"search","description":"Find a literal string in project text files. Bounded to 100 matching lines.","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},
      {"name":"write_file","description":"Create or replace a UTF-8 project file. Requires user permission in ask mode. Respect AGENTS.md.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Relative to the project root, such as src/main.rs. Never an absolute path."},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}},
+     {"name":"edit_file","description":"Replace one exact, unique old_text occurrence in a UTF-8 project file. Read the file first, include enough context to match once, and preserve unrelated content. Shows a diff for approval and rejects stale edits.","input_schema":{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"],"additionalProperties":false}},
      {"name":"shell","description":"Run a shell command in the project, with a 30-second timeout and bounded output. Requires explicit permission in ask mode. It is NOT a filesystem sandbox.","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}},
      {"name":"check_file","description":"Independently verify a saved file. kind is exists, contains, text_equals or json_equals. expected is a STRING: serialized JSON for json_equals, literal text for text checks, or empty for exists. A check is not a model opinion.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Relative to the project root, such as src/main.rs. Never an absolute path."},"kind":{"type":"string","enum":["exists","contains","text_equals","json_equals"]},"expected":{"type":"string","description":"For json_equals, a JSON-encoded value as text, e.g. {\"ready\":true}. For exists, use an empty string."}},"required":["path","kind","expected"],"additionalProperties":false}}
     ])
@@ -113,7 +116,7 @@ fn string<'a>(a: &'a Value, k: &str) -> Result<&'a str> {
         .with_context(|| format!("{k} must be a string"))
 }
 pub fn mutates(name: &str) -> bool {
-    matches!(name, "write_file" | "shell")
+    matches!(name, "write_file" | "edit_file" | "shell")
 }
 pub fn preview(root: &Path, name: &str, a: &Value) -> String {
     if name == "shell" {
@@ -123,17 +126,9 @@ pub fn preview(root: &Path, name: &str, a: &Value) -> String {
             root.display()
         );
     }
-    let filename = a["path"].as_str().unwrap_or("");
-    let before = path(root, filename)
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .unwrap_or_default();
-    format!(
-        "{}\n\nBEFORE\n{}\n\nAFTER\n{}",
-        filename,
-        clip(&before, 5000),
-        clip(a["content"].as_str().unwrap_or(""), 5000)
-    )
+    crate::edits::prepare(root, name, a)
+        .map(|edit| clip(&edit.diff, 12000))
+        .unwrap_or_else(|e| e.to_string())
 }
 pub fn clip(s: &str, n: usize) -> String {
     let mut end = s.len().min(n);
@@ -153,10 +148,7 @@ fn read(root: &Path, name: &str) -> Result<String> {
     };
     Ok(fs::read_to_string(p)?)
 }
-pub fn execute(root: &Path, name: &str, a: &Value, cancel: &Arc<AtomicBool>) -> Result<Value> {
-    if cancel.load(Ordering::Relaxed) {
-        bail!("Stopped")
-    }
+pub fn validate(name: &str, a: &Value) -> Result<()> {
     let spec = schemas()
         .as_array()
         .unwrap()
@@ -173,10 +165,46 @@ pub fn execute(root: &Path, name: &str, a: &Value, cancel: &Arc<AtomicBool>) -> 
     {
         bail!("Invalid tool arguments")
     }
+    Ok(())
+}
+pub fn execute(root: &Path, name: &str, a: &Value, cancel: &Arc<AtomicBool>) -> Result<Value> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("Stopped");
+    }
+    validate(name, a)?;
     match name {
         "list_files" => Ok(json!({"files":files(root)?,"limit":800})),
         "read_file" => {
-            Ok(json!({"path":string(a,"path")?,"content":read(root,string(a,"path")?)?}))
+            let offset = a
+                .get("offset")
+                .map(|v| v.as_u64().context("offset must be a positive integer"))
+                .transpose()?
+                .unwrap_or(1) as usize;
+            let limit = a
+                .get("limit")
+                .map(|v| v.as_u64().context("limit must be an integer"))
+                .transpose()?
+                .unwrap_or(200) as usize;
+            if offset == 0 || !(1..=500).contains(&limit) {
+                bail!("Use offset >= 1 and limit between 1 and 500");
+            }
+            let text = read(root, string(a, "path")?)?;
+            let lines: Vec<_> = text.lines().collect();
+            let selected: Vec<_> = lines
+                .iter()
+                .enumerate()
+                .skip(offset - 1)
+                .take(limit)
+                .collect();
+            let content = selected
+                .iter()
+                .map(|(i, t)| format!("{}: {t}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let end = (offset - 1).saturating_add(selected.len());
+            Ok(
+                json!({"path":string(a,"path")?,"content":content,"offset":offset,"total_lines":lines.len(),"next_offset":if end < lines.len(){Some(end+1)}else{None}}),
+            )
         }
         "search" => {
             let q = string(a, "query")?;
@@ -198,19 +226,7 @@ pub fn execute(root: &Path, name: &str, a: &Value, cancel: &Arc<AtomicBool>) -> 
             }
             Ok(json!({"matches":matches}))
         }
-        "write_file" => {
-            let content = string(a, "content")?;
-            if content.len() > 128_000 {
-                bail!("Write exceeds 128 KB")
-            };
-            let p = path(root, string(a, "path")?)?;
-            fs::create_dir_all(p.parent().unwrap())?;
-            if cancel.load(Ordering::Relaxed) {
-                bail!("Stopped")
-            };
-            crate::session::private_write(&p, content.as_bytes())?;
-            Ok(json!({"path":string(a,"path")?,"bytes":content.len(),"written":true}))
-        }
+        "write_file" | "edit_file" => crate::edits::prepare(root, name, a)?.commit(root),
         "check_file" => {
             let kind = string(a, "kind")?;
             let filename = string(a, "path")?;
@@ -317,6 +333,31 @@ fn shell(root: &Path, command: &str, cancel: &Arc<AtomicBool>) -> Result<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paginated_read_reports_continuation_and_bounds() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("a"), "first\nsecond\nthird\n").unwrap();
+        let c = Arc::new(AtomicBool::new(false));
+        let a = execute(
+            d.path(),
+            "read_file",
+            &json!({"path":"a","offset":1,"limit":2}),
+            &c,
+        )
+        .unwrap();
+        assert_eq!(a["content"], "1: first\n2: second");
+        assert_eq!(a["next_offset"], 3);
+        let b = execute(
+            d.path(),
+            "read_file",
+            &json!({"path":"a","offset":3,"limit":2}),
+            &c,
+        )
+        .unwrap();
+        assert_eq!(b["content"], "3: third");
+        assert!(b["next_offset"].is_null());
+        assert!(execute(d.path(), "read_file", &json!({"path":"a","offset":0}), &c).is_err());
+    }
     #[test]
     fn boundaries_and_exact_check() {
         let d = tempfile::tempdir().unwrap();

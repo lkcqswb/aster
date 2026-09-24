@@ -42,6 +42,8 @@ pub struct Session {
     pub tools: u64,
     pub checks: Vec<Check>,
     pub parent: Option<String>,
+    #[serde(default)]
+    pub work: crate::work::Work,
 }
 impl Session {
     pub fn new(project: PathBuf, model: String, demo: bool) -> Self {
@@ -64,6 +66,7 @@ impl Session {
             tools: 0,
             checks: vec![],
             parent: None,
+            work: Default::default(),
         }
     }
     pub fn add(&mut self, role: &str, text: impl Into<String>) {

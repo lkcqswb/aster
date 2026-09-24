@@ -1998,6 +1998,7 @@ mod layout_tests {
             model: "MiniMax-M2.7".into(),
             pet: root.join("pet"),
             chrome: root.join("chrome"),
+            texture_size: 2048,
         };
         let store = Store::open(&cfg.state).unwrap();
         App::new(cfg, cli, store).unwrap()

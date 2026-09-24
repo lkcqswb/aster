@@ -4,13 +4,42 @@
 <script src="vendor/pixi.min.js"></script><script src="vendor/live2dcubismcore.min.js"></script><script src="vendor/pixi-live2d-display-cubism4.min.js"></script>
 <script>
 window.asterReady=false;window.asterError='';window.asterStage='initializing';
+window.asterLoading={requested:0,loaded:0,rig:false,textures:[],warnings:[]};
 window.addEventListener('error',event=>{window.asterError=event.message||'Renderer resource failed';});
 window.addEventListener('unhandledrejection',event=>{window.asterError=String(event.reason||'Renderer promise failed');});
 (async()=>{
  const W=420,H=620,canvas=document.getElementById('portrait');
  const app=new PIXI.Application({view:canvas,width:W,height:H,backgroundColor:0x111318,antialias:true,preserveDrawingBuffer:true,autoStart:false});
+ window.asterStage='reading renderer settings';
+ const settings=await fetch('settings.json').then(r=>{if(!r.ok)throw Error('Renderer settings unavailable');return r.json()});
+ const textureLimit=Math.max(512,Math.min(4096,settings.texture_size||2048));
+ const originalFromURL=PIXI.Texture.fromURL.bind(PIXI.Texture);
+ PIXI.Texture.fromURL=async (url,options)=>{
+  window.asterLoading.requested++;
+  const texture=await originalFromURL(url,options);
+  const source=texture.baseTexture.resource.source;
+  const width=texture.baseTexture.width,height=texture.baseTexture.height;
+  const ratio=Math.min(1,textureLimit/Math.max(width,height));
+  let rendered=texture;
+  if(ratio<1){
+   try{
+    const reduced=document.createElement('canvas');reduced.width=Math.round(width*ratio);reduced.height=Math.round(height*ratio);
+    const context=reduced.getContext('2d');context.imageSmoothingEnabled=true;context.imageSmoothingQuality='high';
+    context.drawImage(source,0,0,reduced.width,reduced.height);
+    rendered=PIXI.Texture.from(reduced);
+   }catch(error){window.asterLoading.warnings.push(String(error));rendered=texture;}
+   if(rendered!==texture){try{texture.destroy(true)}catch(error){window.asterLoading.warnings.push(String(error))}}
+  }
+  window.asterLoading.textures.push({file:String(url).split('/').pop(),original:[width,height],rendered:[rendered.baseTexture.width,rendered.baseTexture.height]});
+  window.asterLoading.loaded++;
+  return rendered;
+ };
  window.asterStage='loading model and textures';
- const model=await PIXI.live2d.Live2DModel.from('model/'+encodeURIComponent('弄玉.model3.json'),{autoInteract:false,autoUpdate:false});
+ let model;
+ await new Promise((resolve,reject)=>{
+  model=PIXI.live2d.Live2DModel.fromSync('model/'+encodeURIComponent('弄玉.model3.json'),{autoInteract:false,autoUpdate:false,onLoad:resolve,onError:reject});
+  model.on('modelLoaded',()=>{window.asterLoading.rig=true});
+ });
  window.asterStage='positioning model';
  app.stage.addChild(model);
  model.scale.set(1);model.position.set(0,0);
@@ -43,7 +72,7 @@ window.addEventListener('unhandledrejection',event=>{window.asterError=String(ev
   t+=Math.min(250,dt)/1000;model.update(Math.min(250,dt));app.renderer.render(app.stage);frame++;
   return {png:canvas.toDataURL('image/png').split(',')[1],frame,state,mood,time:t};
  };
- window.asterInfo={model:'弄玉',renderer:'Live2D Cubism + Pixi',textures:model.textures.length,width:W,height:H,raw:{width:raw.width,height:raw.height}};
+ window.asterInfo={model:'弄玉',renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings,width:W,height:H,raw:{width:raw.width,height:raw.height}};
  window.asterFrame({state:'idle'});window.asterReady=true;window.asterStage='ready';
 })().catch(e=>{window.asterError=String(e&&e.message||e)});
 </script>

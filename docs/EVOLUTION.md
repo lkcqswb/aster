@@ -36,4 +36,8 @@ A searchable skill/prompt picker beside the model, lazy skill and supporting-fil
 
 Live command output, explicit stop/timeout/exit states, bounded head-and-tail capture, F4 and portrait-click access, direct local commands without a model request, and user-invoked recovery from failure. The companion keeps the latest output and actual status in her work area. Side panels clear the underlying transcript to avoid stray background text.
 
-Next: renderer resource use and lifecycle, stronger search, and evidence-aware review across task steps.
+## Delivered in 0.7
+
+Configurable runtime texture scaling with a 2048-pixel default, actual size diagnostics and loading progress. Native assets remain unchanged. Three profiles were checked for animation and visual quality; the default uses 75% fewer texture pixels.
+
+Next: process lifecycle, stronger project search, and evidence-aware review across task steps.

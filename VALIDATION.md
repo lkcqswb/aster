@@ -1,3 +1,14 @@
+# Renderer texture profiles 0.7 — 2026-09-24
+
+- **45 Rust tests passed**, including validated texture bounds and the private settings endpoint's host/path restrictions. Formatting, Clippy with warnings denied and the release build passed.
+- Native 4096, balanced 2048 and smaller 1024 profiles each loaded all nine textures on the first attempt and captured at least nine changing frames. Their observed probe times were **4.840, 4.496 and 4.131 seconds** in this one local comparison. This is not a general startup benchmark.
+- The default 2048 profile rendered **37,748,736 texture pixels versus 150,994,944 native pixels**, a **75% reduction**. The 1024 profile rendered 9,437,184 pixels, a 93.75% reduction. These are texture-pixel counts, not measured total process memory. Source model, metadata and texture hashes were identical before and after all probes. Evidence: `.aster/qa/texture-profiles.json`.
+- The actual 420×620 portrait at all three settings was visually inspected. The 2048 setting retained the visible face, hair, ornaments and clothing detail at the terminal's rendering size; native texture mode remains available. Assets and vendor SDK files were not modified or committed.
+- The full companion decision/edit/check/review PTY workflow passed with **40 distinct frames**, including resizing and clean exit. The deliberately failed startup test exhausted the single automatic retry, then `/pet retry` recovered with **10 distinct frames**, nine textures and exit 0. No API requests were made for this update.
+- Startup diagnostics now record rig/texture progress and original/rendered dimensions. The intermittent historical startup timeout has not been assigned a proven root cause.
+
+---
+
 # Live command work and recovery 0.6 — 2026-09-24
 
 - **43 Rust tests passed**, including output arriving before process exit, exact failure status/stderr, distinct cancellation and timeout, bounded first/last capture, and direct local commands with no key or model request. Formatting, Clippy with warnings denied and the release build passed.

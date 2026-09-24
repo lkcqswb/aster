@@ -920,6 +920,7 @@ mod integration_tests {
             model: "MiniMax-M2.7".into(),
             pet: root.join("assets"),
             chrome: root.join("chrome"),
+            texture_size: 2048,
         }
     }
     #[test]

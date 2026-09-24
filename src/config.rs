@@ -39,6 +39,9 @@ pub struct Cli {
     #[arg(long)]
     /// Chrome or Chromium executable for the private renderer
     pub chrome: Option<PathBuf>,
+    #[arg(long, default_value_t = 2048, value_parser = clap::value_parser!(u32).range(512..=4096))]
+    /// Maximum Live2D texture edge for this renderer; original assets stay unchanged
+    pub texture_size: u32,
     #[arg(long)]
     /// Run one turn without opening the terminal interface
     pub prompt: Option<String>,
@@ -72,6 +75,7 @@ pub struct Config {
     pub model: String,
     pub pet: PathBuf,
     pub chrome: PathBuf,
+    pub texture_size: u32,
 }
 impl Config {
     pub fn load(cli: &Cli) -> Result<Self> {
@@ -125,6 +129,7 @@ impl Config {
                 .clone()
                 .or_else(|| std::env::var_os("ASTER_PET_DIR").map(PathBuf::from))
                 .unwrap_or_else(|| user.join("desktop-pet/assets")),
+            texture_size: cli.texture_size,
             chrome: cli
                 .chrome
                 .clone()
@@ -160,4 +165,20 @@ fn read_env(path: &std::path::Path) -> HashMap<String, String> {
             })
         })
         .collect()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn texture_limits_are_validated_before_startup() {
+        assert_eq!(Cli::try_parse_from(["aster"]).unwrap().texture_size, 2048);
+        assert_eq!(
+            Cli::try_parse_from(["aster", "--texture-size", "4096"])
+                .unwrap()
+                .texture_size,
+            4096
+        );
+        assert!(Cli::try_parse_from(["aster", "--texture-size", "511"]).is_err());
+        assert!(Cli::try_parse_from(["aster", "--texture-size", "4097"]).is_err());
+    }
 }

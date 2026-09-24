@@ -73,6 +73,8 @@ A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SD
 
 Startup diagnostics are saved privately in `~/.local/share/aster/diagnostics/live2d.json` (or under your selected `--state-dir`). This is a record of the latest startup or error transition, not a continuously updated frame counter. It contains no conversation or provider key. Renderer traffic stays on loopback and bypasses proxy settings. Browser stderr is retained only in its temporary profile, with a bounded excerpt included when startup fails.
 
+The renderer defaults to a 2048-pixel texture limit. The nine original 4096-pixel textures are reduced in browser memory for the terminal portrait, using 75% fewer texture pixels; source assets are never rewritten. Use `--texture-size 4096` for native textures or `--texture-size 1024` for a smaller profile. `/status` reports the actual loaded texture sizes and loading progress. Texture-pixel reduction is not a claim about total process memory.
+
 The local renderer makes at most one automatic retry after a startup failure. Missing model/Chrome paths fail immediately; provider API requests never retry automatically.
 
 ## Conversations and commands

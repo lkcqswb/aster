@@ -235,6 +235,9 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
     let expected_host = address.to_string();
+    let settings = json!({"texture_size":cfg.texture_size})
+        .to_string()
+        .into_bytes();
     let join = thread::spawn(move || {
         while !s.load(Ordering::Relaxed) {
             if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(100)) {
@@ -260,6 +263,8 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
                         include_bytes!("../live2d/renderer.html").to_vec(),
                         "text/html",
                     ))
+                } else if name == "settings.json" {
+                    Some((settings.clone(), "application/json"))
                 } else {
                     paths.get(name).and_then(|p| fs::read(p).ok()).map(|b| {
                         (
@@ -431,13 +436,28 @@ fn render_loop(cfg: &Config, shared: &Arc<Mutex<Shared>>, stop: &Arc<AtomicBool>
     }
     let mut cdp = Cdp { socket, id: 0 };
     report(cfg, shared, "Loading her Live2D model…", None);
+    let mut last_loading = Value::Null;
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
         let value = cdp.evaluate(
-            "({ready:window.asterReady,error:window.asterError,info:window.asterInfo,stage:window.asterStage,document:document.readyState})",
+            "({ready:window.asterReady,error:window.asterError,info:window.asterInfo,stage:window.asterStage,loading:window.asterLoading,document:document.readyState})",
         )?;
+        if value["loading"].is_object() && value["loading"] != last_loading {
+            last_loading = value["loading"].clone();
+            shared.lock().unwrap().info["loading"] = last_loading.clone();
+            report(
+                cfg,
+                shared,
+                &format!(
+                    "Loading her model · {}/{} textures",
+                    last_loading["loaded"].as_u64().unwrap_or(0),
+                    last_loading["requested"].as_u64().unwrap_or(0)
+                ),
+                None,
+            );
+        }
         if value["ready"] == true {
             {
                 let mut s = shared.lock().unwrap();
@@ -652,6 +672,70 @@ pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn renderer_settings_are_local_and_asset_routes_stay_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let pet = root.path().join("assets");
+        let model = pet.join("弄玉运行档_无水印");
+        fs::create_dir_all(&model).unwrap();
+        fs::create_dir_all(pet.join("vendor")).unwrap();
+        fs::write(
+            model.join("弄玉.model3.json"),
+            r#"{"FileReferences":{"Moc":"model.moc3","Textures":["texture.png"]}}"#,
+        )
+        .unwrap();
+        for name in ["model.moc3", "texture.png"] {
+            fs::write(model.join(name), "fixture").unwrap();
+        }
+        for name in [
+            "pixi.min.js",
+            "live2dcubismcore.min.js",
+            "pixi-live2d-display-cubism4.min.js",
+        ] {
+            fs::write(pet.join("vendor").join(name), "fixture").unwrap();
+        }
+        let cfg = Config {
+            home: root.path().into(),
+            project: root.path().into(),
+            state: root.path().join("state"),
+            key: String::new(),
+            base: String::new(),
+            model: String::new(),
+            pet,
+            chrome: root.path().join("chrome"),
+            texture_size: 1024,
+        };
+        let server = assets(&cfg).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let settings: Value = client
+            .get(format!("{}settings.json", server.url))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(settings, json!({"texture_size":1024}));
+        assert_eq!(
+            client
+                .get(format!("{}.env", server.url))
+                .send()
+                .unwrap()
+                .status(),
+            404
+        );
+        assert_eq!(
+            client
+                .get(format!("{}settings.json", server.url))
+                .header("Host", "untrusted.example")
+                .send()
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    #[test]
     fn graphics_packets_are_inline_and_chunked() {
         let a = Rect::new(2, 3, 20, 30);
         let it = Graphics::Iterm.encode(b"png", a);
@@ -695,6 +779,7 @@ mod tests {
             model: String::new(),
             pet: root.path().join("pet"),
             chrome: root.path().join("missing-chrome"),
+            texture_size: 2048,
         };
         let companion = Companion::start(cfg.clone());
         let deadline = Instant::now() + Duration::from_secs(3);

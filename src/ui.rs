@@ -93,6 +93,21 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/quit", "Save and leave"),
 ];
 
+/// Commands that cannot do anything useful without an argument.
+const NEEDS_ARGUMENT: &[&str] = &[
+    "/rename",
+    "/skill",
+    "/prompt",
+    "/check",
+    "/run",
+    "/task",
+    "/steer",
+    "/follow",
+    "/drop",
+    "/restore",
+    "/permissions",
+    "/mood",
+];
 pub fn clean(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -471,10 +486,21 @@ impl App {
                         | Popup::Delete
                 )
             );
+        let catalog = crate::context::discover(&self.cfg.project);
+        let available = crate::actions::Available {
+            checkpoint: self.session.checkpoint.is_some(),
+            waiting: self.session.pending.len(),
+            skills: catalog.skills.len(),
+            prompts: catalog.prompts.len(),
+            entries: self.session.entries.len(),
+            messages: self.session.messages.len(),
+            plan_mode: self.session.mode == "plan",
+        };
         self.inspect(Popup::Actions(crate::actions::Menu::new(
             &self.session.work,
             self.running.is_some(),
             decision,
+            available,
         )));
     }
     fn click(&mut self, column: u16, row: u16) -> Result<()> {
@@ -705,8 +731,8 @@ impl App {
    "/restore"=>{if arg.is_empty(){bail!("Use /restore followed by the ID shown in /checkpoint")};self.persist()?;self.session=self.store.restore_checkpoint(arg,&self.cfg.project)?;self.scroll=0;self.stream.clear();self.notify("Full context restored as a new conversation. Project files are shared.");},
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
-   "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();},
-   "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
+   "/mood"=>{if !matches!(arg,"neutral"|"happy"|"heart"|"angry"){bail!("Use /mood neutral, happy, heart, or angry")};self.mood=arg.into();self.notify(if self.companion.is_some(){format!("弄玉 · {arg}")}else{format!("Mood set to {arg} · Live2D is hidden, /pet on shows her")});},
+   "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true);self.notify("弄玉 looks toward you");}else{self.notify("Live2D is hidden · /pet on shows her");}self.reaction=Some(("listening".into(),Instant::now()));},
    "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?,self.cfg.limits.describe())),
@@ -1119,6 +1145,11 @@ impl App {
             self.run_next()?;
         }
         if let Some(Popup::Actions(menu)) = &mut self.popup {
+            menu.available.waiting = self.session.pending.len();
+            menu.available.checkpoint = self.session.checkpoint.is_some();
+            menu.available.entries = self.session.entries.len();
+            menu.available.messages = self.session.messages.len();
+            menu.available.plan_mode = self.session.mode == "plan";
             menu.refresh(
                 &self.session.work,
                 self.running.is_some(),
@@ -1931,8 +1962,17 @@ impl App {
             }
             KeyCode::Enter => {
                 if !suggestions.is_empty() && self.composer.text.trim() != suggestions[chosen].0 {
-                    self.input_set(suggestions[chosen].0);
-                    return Ok(());
+                    let command = suggestions[chosen].0;
+                    if NEEDS_ARGUMENT.contains(&command) {
+                        self.input_set(format!("{command} "));
+                        self.notify(format!(
+                            "{command} needs a little more · type it, then Enter"
+                        ));
+                        return Ok(());
+                    }
+                    self.prompts.push(command);
+                    self.input_set("");
+                    return self.command(command);
                 }
                 // A trailing backslash continues the message on a new line.
                 if self.composer.text[..self.composer.cursor].ends_with('\\') {
@@ -2044,7 +2084,23 @@ impl App {
             Paragraph::new("─".repeat(area.width as usize)).style(style(LINE)),
             Rect::new(area.x, area.y + 1, area.width, 1),
         );
-        let columns = area.width.saturating_sub(6).max(1) as usize;
+        let pet_width = if self.companion.is_some() || self.portrait.frame.is_some() {
+            if area.width >= 110 {
+                area.width * 34 / 100
+            } else if area.width >= 72 {
+                (area.width * 30 / 100).max(24)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        // Her column runs from the header to the footer, beside the composer, so a growing
+        // draft never moves the portrait (moving it forces the terminal to repaint).
+        let left_width = area
+            .width
+            .saturating_sub(pet_width + if pet_width > 0 { 3 } else { 0 });
+        let columns = left_width.saturating_sub(6).max(1) as usize;
         self.composer_width = columns;
         let rows = self.composer.rows(columns);
         let visible_rows = rows.len().clamp(1, 6) as u16;
@@ -2057,24 +2113,7 @@ impl App {
             area.width,
             composer_y.saturating_sub(area.y + 2),
         );
-        let pet_width = if self.companion.is_some() || self.portrait.frame.is_some() {
-            if area.width >= 110 {
-                area.width * 34 / 100
-            } else if area.width >= 72 {
-                (area.width * 30 / 100).max(24)
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-        let chat = Rect::new(
-            body.x,
-            body.y,
-            body.width
-                .saturating_sub(pet_width + if pet_width > 0 { 3 } else { 0 }),
-            body.height,
-        );
+        let chat = Rect::new(body.x, body.y, left_width, body.height);
         if self.session.entries.is_empty() && self.stream.is_empty() && self.running.is_none() {
             self.welcome(f, chat)
         } else {
@@ -2082,22 +2121,27 @@ impl App {
         }
         if pet_width > 0 {
             let divider = chat.right() + 1;
-            for y in body.y..body.bottom() {
+            for y in body.y..footer_y {
                 f.render_widget(
                     Paragraph::new("│").style(style(LINE)),
                     Rect::new(divider, y, 1, 1),
                 );
             }
-            let pet = Rect::new(body.right() - pet_width, body.y, pet_width, body.height);
+            let pet = Rect::new(
+                area.right() - pet_width,
+                body.y,
+                pet_width,
+                footer_y.saturating_sub(body.y),
+            );
             self.draw_pet(f, pet);
         }
-        let composer = Rect::new(area.x, composer_y, area.width, composer_h);
+        let composer = Rect::new(area.x, composer_y, left_width, composer_h);
         self.draw_composer(f, composer, columns, &rows, visible_rows as usize);
         self.draw_footer(f, Rect::new(area.x, footer_y, area.width, 1));
         let options = self.suggestions();
         if !options.is_empty() && self.popup.is_none() {
             let count = options.len().min(8) as u16;
-            let w = area.width.min(76);
+            let w = left_width.min(76);
             let r = Rect::new(area.x, composer_y.saturating_sub(count + 2), w, count + 2);
             f.render_widget(Clear, r);
             f.render_widget(
@@ -2132,18 +2176,9 @@ impl App {
         }
         self.action_rows.clear();
         if let Some(popup) = &mut self.popup {
-            let decision = matches!(
-                popup,
-                Popup::Approval(_)
-                    | Popup::Actions(_)
-                    | Popup::History(_)
-                    | Popup::Tasks { .. }
-                    | Popup::Project(_)
-                    | Popup::Question { .. }
-                    | Popup::Redirect { .. }
-                    | Popup::Resources { .. }
-            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output") || title.starts_with("Checks beside") || title.starts_with("Context checkpoint"));
-            let side_by_side = decision && pet_width > 0 && chat.width >= 42;
+            // Every panel opens beside her when there is room; hiding her image would force
+            // the terminal to repaint.
+            let side_by_side = pet_width > 0 && chat.width >= 42;
             // Nothing half-hidden behind a panel: wide characters would tear its border.
             let modal = Rect::new(area.x, body.y, area.width, footer_y.saturating_sub(body.y));
             let behind = if side_by_side { chat } else { modal };
@@ -2158,7 +2193,7 @@ impl App {
                 self.inspection_return.is_some(),
                 &self.session.id,
                 if side_by_side {
-                    Rect::new(chat.x, body.y, chat.width, body.height + composer_h)
+                    Rect::new(chat.x, body.y, chat.width, footer_y.saturating_sub(body.y))
                 } else {
                     modal
                 },
@@ -3266,6 +3301,39 @@ fn relative_time(stamp: &str, now: chrono::DateTime<chrono::Utc>) -> String {
         _ => then.format("%Y-%m-%d").to_string(),
     }
 }
+/// Rewrite every cell on the rows of `area` from `buffer`, skipping wide-character
+/// continuations exactly as Ratatui's own diff does.
+fn repaint_rows<B: ratatui::backend::Backend>(
+    backend: &mut B,
+    buffer: &ratatui::buffer::Buffer,
+    area: Rect,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
+    let area = area.intersection(buffer.area);
+    let mut cells = vec![];
+    for y in area.top()..area.bottom() {
+        let mut skip = 0usize;
+        for x in buffer.area.left()..buffer.area.right() {
+            let cell = &buffer[(x, y)];
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            let width = match cell.diff_option {
+                ratatui::buffer::CellDiffOption::Skip => continue,
+                ratatui::buffer::CellDiffOption::ForcedWidth(w) => usize::from(w.get()),
+                _ => cell.symbol().width(),
+            };
+            cells.push((x, y, cell));
+            skip = width.saturating_sub(1);
+        }
+    }
+    backend.draw(cells.into_iter())?;
+    ratatui::backend::Backend::flush(backend)?;
+    Ok(())
+}
 /// Drop whole " · " separated hints from the end until the line fits.
 fn fit_hint(hint: &str, width: usize) -> String {
     let mut parts = hint.split(" · ").collect::<Vec<_>>();
@@ -3362,13 +3430,14 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 continue;
             }
             let old_area = app.last_image.map(|(_, r)| r);
-            terminal.draw(|f| app.draw(f))?;
-            if old_area.is_some_and(|r| r != app.image_area) {
+            let completed = terminal.draw(|f| app.draw(f))?;
+            let moved = old_area.filter(|r| *r != app.image_area);
+            let snapshot = moved.map(|_| completed.buffer.clone());
+            if let (Some(old), Some(buffer)) = (moved, snapshot) {
+                // Only the rows her previous image covered are rewritten; clearing the whole
+                // screen here made every panel or layout change blink.
                 write!(io::stdout(), "{}", app.graphics.clear())?;
-                // Fullscreen redraw needs no cursor-position round trip. A queued
-                // Escape or an emulator without a reply must not terminate Aster.
-                terminal.resize(terminal.size()?.into())?;
-                terminal.draw(|f| app.draw(f))?;
+                repaint_rows(terminal.backend_mut(), &buffer, old)?;
                 app.last_image = None;
             }
             if app.image_area.width > 0
@@ -4401,6 +4470,78 @@ mod layout_tests {
         a.command("/compact auto off").unwrap();
         assert!(!a.session.auto_compact);
         assert!(screen(&mut a, 132, 42).contains("auto-compact off"));
+    }
+    /// What a person can see changed after one action.
+    fn visible_state(a: &mut App) -> String {
+        format!(
+            "{}|{:?}|{}|{}|{}|{}|{}|{}|{}",
+            screen(a, 132, 42),
+            a.popup.is_some(),
+            a.running.is_some(),
+            a.session.id,
+            a.session.mode,
+            a.cli.permissions,
+            a.show_tools,
+            a.mood,
+            a.session.entries.len()
+        )
+    }
+    #[test]
+    fn every_command_and_menu_action_gives_visible_feedback() {
+        let d = tempfile::tempdir().unwrap();
+        let mut silent = vec![];
+        for (name, _) in COMMANDS {
+            if matches!(*name, "/quit" | "/delete") {
+                continue;
+            }
+            let mut a = app(d.path());
+            a.session.add("you", "earlier request");
+            a.session.add("nongyu", "earlier reply");
+            let before = visible_state(&mut a);
+            a.input_set(*name);
+            // A complete command name runs on Enter. Errors become footer notices, as in
+            // the event loop.
+            if let Err(e) = a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                a.notify(e.to_string());
+            }
+            for _ in 0..20 {
+                a.tick().unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if visible_state(&mut a) == before {
+                silent.push(name.to_string());
+            }
+            a.stop();
+            finish(&mut a);
+            drop(a);
+        }
+        let menu = {
+            let mut a = app(d.path());
+            a.session.add("you", "earlier request");
+            a.show_actions();
+            let Some(Popup::Actions(menu)) = a.popup.take() else {
+                panic!("menu did not open")
+            };
+            menu
+        };
+        for (index, choice) in menu.items.iter().enumerate() {
+            let mut a = app(d.path());
+            a.session.add("you", "earlier request");
+            a.show_actions();
+            if let Some(Popup::Actions(m)) = &mut a.popup {
+                m.index = index;
+            }
+            screen(&mut a, 132, 42);
+            let before = visible_state(&mut a);
+            if let Err(e) = a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                a.notify(e.to_string());
+            }
+            if visible_state(&mut a) == before {
+                silent.push(format!("menu: {}", choice.label));
+            }
+            drop(a);
+        }
+        assert!(silent.is_empty(), "no visible feedback: {silent:?}");
     }
     #[test]
     fn multiline_composer_follows_the_cursor() {

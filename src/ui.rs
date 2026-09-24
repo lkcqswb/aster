@@ -10,7 +10,8 @@ use anyhow::{Context, Result, bail};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+        Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     execute,
 };
@@ -66,6 +67,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/run", "Run a local command without a model request"),
     ("/output", "Watch the latest command output"),
     ("/recover", "Ask for help with a failed command"),
+    ("/together", "Open the companion action menu"),
     ("/work", "Open 弄玉's plan and task evidence"),
     ("/review", "Review the changes made this turn"),
     ("/steer", "Give a new direction during work"),
@@ -161,6 +163,7 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    Actions(crate::actions::Menu),
     Project(Box<crate::navigator::Navigator>),
     Resources {
         items: Vec<crate::context::Resource>,
@@ -211,6 +214,7 @@ pub struct App {
     graphics: Graphics,
     image_area: Rect,
     work_area: Rect,
+    action_rows: Vec<(Rect, crate::actions::Action)>,
     last_image: Option<(u64, Rect)>,
     mood: String,
     state: String,
@@ -272,6 +276,7 @@ impl App {
             graphics,
             image_area: Rect::default(),
             work_area: Rect::default(),
+            action_rows: vec![],
             last_image: None,
             mood: "neutral".into(),
             state: "idle".into(),
@@ -291,6 +296,69 @@ impl App {
             text: text.into(),
             scroll: 0,
         });
+    }
+    fn show_actions(&mut self) {
+        let decision = self.inspection_return.is_some()
+            || matches!(
+                self.popup,
+                Some(
+                    Popup::Approval(_)
+                        | Popup::Question { .. }
+                        | Popup::Redirect { .. }
+                        | Popup::Delete
+                )
+            );
+        self.inspect(Popup::Actions(crate::actions::Menu::new(
+            &self.session.work,
+            self.running.is_some(),
+            decision,
+        )));
+    }
+    fn click(&mut self, column: u16, row: u16) -> Result<()> {
+        if let Some(Popup::Actions(menu)) = &mut self.popup
+            && let Some((_, action)) = self
+                .action_rows
+                .iter()
+                .find(|(area, _)| area.contains((column, row).into()))
+            && let Some(index) = menu
+                .filtered()
+                .iter()
+                .position(|choice| choice.action == *action)
+        {
+            menu.index = index;
+            return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        if self.image_area.contains((column, row).into())
+            || self.work_area.contains((column, row).into())
+        {
+            if let Some(c) = &self.companion {
+                c.motion("listening", &self.mood, true, false);
+            }
+            self.reaction = Some(("listening".into(), Instant::now()));
+            self.show_actions();
+        }
+        Ok(())
+    }
+    fn begin_redirect(&mut self) {
+        if self.running.is_none() || matches!(self.popup, Some(Popup::Redirect { .. })) {
+            return;
+        }
+        if matches!(
+            self.inspection_return.as_deref(),
+            Some(Popup::Redirect { .. })
+        ) {
+            self.popup = self.inspection_return.take().map(|p| *p);
+        } else {
+            let previous = self
+                .inspection_return
+                .take()
+                .or_else(|| self.popup.take().map(Box::new));
+            self.popup = Some(Popup::Redirect {
+                input: String::new(),
+                previous,
+            });
+        }
+        self.last_image = None;
     }
     fn inspect(&mut self, popup: Popup) {
         if matches!(
@@ -332,8 +400,18 @@ impl App {
     }
     fn paste(&mut self, text: &str) {
         let text = clean(text);
-        if let Some(Popup::Project(nav)) = &mut self.popup {
+        if let Some(Popup::Actions(menu)) = &mut self.popup {
+            menu.paste(&text);
+        } else if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.paste(&text);
+        } else if let Some(
+            Popup::Resources { query, index, .. } | Popup::Sessions { query, index, .. },
+        ) = &mut self.popup
+        {
+            if query.len() + text.len() <= 160 {
+                query.push_str(&text.replace('\n', " "));
+                *index = 0;
+            }
         } else if let Some(Popup::Question { input, .. } | Popup::Redirect { input, .. }) =
             &mut self.popup
         {
@@ -396,6 +474,7 @@ impl App {
                 | "/pet"
                 | "/tools"
                 | "/work"
+                | "/together"
                 | "/checks"
                 | "/output"
                 | "/review"
@@ -423,6 +502,7 @@ impl App {
    "/queue"=>{let text=if self.session.pending.is_empty(){"No messages waiting.\n\nWhile working: Enter adds a direction; Alt+Enter queues the next task.\n/steer MESSAGE · /follow MESSAGE".into()}else{format!("{}\n\n/next runs the next message when idle.\n/drop ID removes a waiting message.\nStopping preserves the queue; it does not run automatically after an error or restart.",self.session.pending.iter().map(|m|format!("{} · {}\n{}\n",m.id,if m.delivery==Delivery::Steer{"direction"}else{"next task"},m.text)).collect::<Vec<_>>().join("\n"))};self.info("Messages waiting for 弄玉",text);},
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
+   "/together"=>self.show_actions(),
    "/work"=>self.show_work(),
    "/files"|"/find"=>self.inspect(Popup::Project(Box::new(crate::navigator::Navigator::new(self.cfg.project.clone(),if cmd=="/files"{crate::navigator::Mode::Files}else{crate::navigator::Mode::Search},arg.into())))),
    "/checks"=>self.info("Checks beside 弄玉",self.session.work.checks_summary()),
@@ -452,7 +532,7 @@ impl App {
    "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 active seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
-   "/help"=>self.info("Make yourself at home",format!("{}\n\nEnter sends / steers · Alt+Enter queues · Ctrl+G redirects\nCtrl+J inserts a line · Esc stops\nCtrl+P opens sessions · Ctrl+K opens commands\nPage Up/Down scroll · Ctrl+T shows tools\nCtrl+C saves and quits · click 弄玉 for a reaction\n\n/new [title] · /rename TITLE · /fork [title]\n/resume ID · /check FILE [expected JSON]\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
+   "/help"=>self.info("Make yourself at home",format!("{}\n\nEnter sends / steers · Alt+Enter queues · Ctrl+G redirects\nCtrl+J inserts a line · Esc stops\nCtrl+P opens sessions · Ctrl+K opens commands\nPage Up/Down scroll · Ctrl+T shows tools\nCtrl+C saves and quits · F1 or click 弄玉 for local task controls\n\n/new [title] · /rename TITLE · /fork [title]\n/resume ID · /check FILE [expected JSON]\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
    "/quit"|"/exit"=>self.request_quit(),
    _=>bail!("Unknown command. Type / to see available commands."),
   }
@@ -841,6 +921,13 @@ impl App {
         {
             self.run_next()?;
         }
+        if let Some(Popup::Actions(menu)) = &mut self.popup {
+            menu.refresh(
+                &self.session.work,
+                self.running.is_some(),
+                self.inspection_return.is_some(),
+            );
+        }
         if self
             .quit_started
             .is_some_and(|t| t.elapsed() > Duration::from_secs(2))
@@ -908,21 +995,15 @@ impl App {
             && self.running.is_some()
             && !matches!(self.popup, Some(Popup::Redirect { .. }))
         {
-            if matches!(
-                self.inspection_return.as_deref(),
-                Some(Popup::Redirect { .. })
-            ) {
-                self.popup = self.inspection_return.take().map(|p| *p);
-                return Ok(());
+            self.begin_redirect();
+            return Ok(());
+        }
+        if key.code == KeyCode::F(1) && !matches!(self.popup, Some(Popup::Resources { .. })) {
+            if matches!(self.popup, Some(Popup::Actions(_))) {
+                self.popup = None;
+            } else {
+                self.show_actions();
             }
-            let previous = self
-                .inspection_return
-                .take()
-                .or_else(|| self.popup.take().map(Box::new));
-            self.popup = Some(Popup::Redirect {
-                input: String::new(),
-                previous,
-            });
             return Ok(());
         }
         if key.code == KeyCode::F(2) {
@@ -947,6 +1028,46 @@ impl App {
         }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::Actions(mut menu) => {
+                    let filtered = menu.filtered();
+                    match key.code {
+                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Enter => {
+                            if let Some(choice) = filtered.get(menu.index) {
+                                match choice.action {
+                                    crate::actions::Action::Return => {}
+                                    crate::actions::Action::Command(command) => {
+                                        self.command(command)?
+                                    }
+                                    crate::actions::Action::Redirect => self.begin_redirect(),
+                                    crate::actions::Action::Stop => self.stop(),
+                                }
+                                return Ok(());
+                            }
+                        }
+                        KeyCode::Down => {
+                            menu.index = (menu.index + 1).min(filtered.len().saturating_sub(1))
+                        }
+                        KeyCode::Up => menu.index = menu.index.saturating_sub(1),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            menu.query.clear();
+                            menu.index = 0;
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && menu.query.len() < 160 =>
+                        {
+                            menu.query.push(c);
+                            menu.index = 0;
+                        }
+                        KeyCode::Backspace => {
+                            menu.query.pop();
+                            menu.index = 0;
+                        }
+                        _ => {}
+                    }
+                    self.popup = Some(Popup::Actions(menu));
+                }
                 Popup::Project(mut nav) => {
                     match nav.key(key) {
                         crate::navigator::Action::Keep => self.popup = Some(Popup::Project(nav)),
@@ -997,11 +1118,25 @@ impl App {
                         KeyCode::Up => index = index.saturating_sub(1),
                         KeyCode::Enter => {
                             if let Some(resource) = filtered.get(index) {
-                                self.input_set(format!(
-                                    "/{} {} ",
+                                let prepared = format!(
+                                    "/{} {} {}",
                                     if skills { "skill" } else { "prompt" },
-                                    resource.name
-                                ));
+                                    resource.name,
+                                    self.input
+                                );
+                                if prepared.len() > 32_000 {
+                                    self.notify(
+                                        "The draft is full. Shorten it before choosing a resource.",
+                                    );
+                                    self.popup = Some(Popup::Resources {
+                                        items,
+                                        skills,
+                                        query,
+                                        index,
+                                    });
+                                    return Ok(());
+                                }
+                                self.input_set(prepared);
                                 self.notify("Add your request, then Enter to send");
                             }
                             return Ok(());
@@ -1473,8 +1608,7 @@ impl App {
                 self.session.pending.len()
             )
         } else if self.notice.is_empty() {
-            "↵ send   / commands   F2 work   F3 review   F6 files   Ctrl+P sessions   Esc stop"
-                .into()
+            "↵ send   / commands   F1 together   F6 files   Ctrl+P sessions   Esc stop".into()
         } else {
             clean(&self.notice)
         };
@@ -1517,10 +1651,12 @@ impl App {
                 );
             }
         }
+        self.action_rows.clear();
         if let Some(popup) = &self.popup {
             let decision = matches!(
                 popup,
                 Popup::Approval(_)
+                    | Popup::Actions(_)
                     | Popup::Project(_)
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
@@ -1534,7 +1670,7 @@ impl App {
             if !side_by_side {
                 self.image_area = Rect::default();
             }
-            Self::draw_popup(
+            self.action_rows = Self::draw_popup(
                 f,
                 popup,
                 self.inspection_return.is_some(),
@@ -1808,16 +1944,10 @@ impl App {
             }
         }
         lines.push(line(
-            if let Some(command) = &work.command {
-                if !command.running
-                    && (command.exit_code != Some(0) || command.timed_out || command.stopped)
-                {
-                    "F4 output · /recover"
-                } else {
-                    "F2 work · F4 output"
-                }
+            if work.command.is_some() {
+                "F1 together · F4 output"
             } else {
-                "F2 work  ·  F3 review"
+                "F1 together · F3 review"
             },
             JADE,
         ));
@@ -1831,7 +1961,12 @@ impl App {
             ),
         );
     }
-    fn draw_popup(f: &mut Frame, p: &Popup, returning: bool, area: Rect) {
+    fn draw_popup(
+        f: &mut Frame,
+        p: &Popup,
+        returning: bool,
+        area: Rect,
+    ) -> Vec<(Rect, crate::actions::Action)> {
         let width = area.width.saturating_sub(4).min(88);
         let desired_height = if let Popup::Resources { items, .. } = p {
             11 + 3 * items.len().min(5) as u16
@@ -1857,7 +1992,75 @@ impl App {
             horizontal: 3,
             vertical: 2,
         });
+        if let Popup::Actions(menu) = p {
+            let filtered = menu.filtered();
+            let visible = (inner.height.saturating_sub(7) / 2).max(1) as usize;
+            let mut rows = vec![];
+            let mut write = |text: String, color, y| {
+                if y < inner.bottom() {
+                    f.render_widget(
+                        Paragraph::new(text).style(style(color)),
+                        Rect::new(inner.x, y, inner.width, 1),
+                    );
+                }
+            };
+            write("Together with 弄玉".into(), JADE, inner.y);
+            write("Local controls · no model request".into(), DIM, inner.y + 2);
+            write(format!("Find: {}", menu.query), FG, inner.y + 3);
+            for (row, (index, choice)) in filtered
+                .iter()
+                .enumerate()
+                .skip(menu.index.saturating_sub(visible - 1))
+                .take(visible)
+                .enumerate()
+            {
+                let y = inner.y + 5 + row as u16 * 2;
+                write(
+                    format!(
+                        "{} {}",
+                        if index == menu.index { "›" } else { " " },
+                        choice.label
+                    ),
+                    if index == menu.index { JADE } else { FG },
+                    y,
+                );
+                write(format!("  {}", choice.detail), DIM, y + 1);
+                rows.push((
+                    Rect::new(inner.x, y, inner.width, 2).intersection(inner),
+                    choice.action,
+                ));
+            }
+            if filtered.is_empty() {
+                write(
+                    "No matching actions. Ctrl+U clears the filter.".into(),
+                    DIM,
+                    inner.y + 5,
+                );
+            }
+            write(
+                format!(
+                    "↑↓ or click · Enter open · Esc back · {}/{}",
+                    if filtered.is_empty() {
+                        0
+                    } else {
+                        menu.index + 1
+                    },
+                    filtered.len()
+                ),
+                DIM,
+                inner.bottom().saturating_sub(1),
+            );
+            if returning {
+                f.render_widget(
+                    Paragraph::new("Decision still waiting · Esc back · Ctrl+G redirect")
+                        .style(style(GOLD)),
+                    Rect::new(inner.x, inner.bottom(), inner.width, 1),
+                );
+            }
+            return rows;
+        }
         let (title,text,scroll)=match p{
+   Popup::Actions(_)=>unreachable!("Action menu is rendered above"),
    Popup::Project(nav)=>nav.view(inner.width as usize,inner.height as usize),
    Popup::Resources{items,skills,query,index}=>{let filtered=items.iter().filter(|r|format!("{} {}",r.name,r.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();let visible=(inner.height.saturating_sub(6)/3).max(1) as usize;let mut text=format!("Find: {query}\n\n");for (i,r) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){text+=&format!("{} {}{}\n  {}\n\n",if i==*index{"›"}else{" "},r.name,if r.manual_only{" · explicit only"}else{""},{let lines=wrap_prose(&r.description.replace('\n'," "),inner.width.saturating_sub(4) as usize);format!("{}{}",lines.first().cloned().unwrap_or_default(),if lines.len()>1{"…"}else{""})});}if filtered.is_empty(){text+="No matching resources.\n";}text+="\n↑↓ choose · Enter prepare · F1 inspect · Esc close";(if *skills{"Skills beside 弄玉"}else{"Reusable prompts"}.into(),text,0)},
    Popup::Redirect{input,..}=>("弄玉 · change direction".into(),format!("Tell me what to change.\nPending actions will be cancelled when you send.\n\n› {input}\n\nEnter send · Esc return to the decision"),0),
@@ -1904,6 +2107,7 @@ impl App {
                 Rect::new(inner.x, inner.bottom(), inner.width, 1),
             );
         }
+        vec![]
     }
 }
 pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
@@ -1965,26 +2169,24 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         app.last_image = None;
                     }
                     TermEvent::Mouse(mouse) => match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll += 3,
-                        MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
-                        MouseEventKind::Down(_)
-                            if app.image_area.contains((mouse.column, mouse.row).into())
-                                || app.work_area.contains((mouse.column, mouse.row).into()) =>
-                        {
-                            if let Some(c) = &app.companion {
-                                c.motion("listening", &app.mood, true, false)
-                            }
-                            app.reaction = Some(("listening".into(), Instant::now()));
-                            if app
-                                .session
-                                .work
-                                .command
-                                .as_ref()
-                                .is_some_and(|c| c.running || c.exit_code != Some(0))
-                            {
-                                app.command("/output")?;
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+                            if app.popup.is_some() {
+                                if let Err(e) = app.key(KeyEvent::new(
+                                    if up { KeyCode::Up } else { KeyCode::Down },
+                                    KeyModifiers::NONE,
+                                )) {
+                                    app.notify(e.to_string());
+                                }
+                            } else if up {
+                                app.scroll += 3;
                             } else {
-                                app.show_work();
+                                app.scroll = app.scroll.saturating_sub(3);
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Err(e) = app.click(mouse.column, mouse.row) {
+                                app.notify(e.to_string());
                             }
                         }
                         _ => {}
@@ -2321,6 +2523,72 @@ mod layout_tests {
         );
     }
     #[test]
+    fn resource_selection_and_pasted_filters_keep_the_existing_request() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        let skill = a.cfg.project.join(".aster/skills/review");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: review\ndescription: Review a change\n---\nRead before editing.",
+        )
+        .unwrap();
+        a.input_set("Explain this change 中文");
+        a.show_resources(true);
+        a.paste("review");
+        assert!(matches!(&a.popup, Some(Popup::Resources{query,..}) if query=="review"));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(a.input, "/skill review Explain this change 中文");
+        assert!(a.session.messages.is_empty());
+        a.command("/sessions").unwrap();
+        a.paste("fresh");
+        assert!(matches!(&a.popup, Some(Popup::Sessions{query,..}) if query=="fresh"));
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(a.input, "/skill review Explain this change 中文");
+    }
+    #[test]
+    fn companion_actions_support_mouse_and_preserve_pending_decisions() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.input_set("Keep this composer draft");
+        let (answer, rx) = crossbeam_channel::bounded(1);
+        a.popup = Some(Popup::Approval(Approval {
+            tool: "write_file".into(),
+            preview: "Pending write".into(),
+            scroll: 0,
+            answer,
+        }));
+        a.key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
+            .unwrap();
+        a.paste("files");
+        let mut terminal = Terminal::new(TestBackend::new(132, 42)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let (row, _) = a
+            .action_rows
+            .iter()
+            .find(|(_, action)| *action == crate::actions::Action::Command("/files"))
+            .unwrap();
+        a.click(row.x + 1, row.y).unwrap();
+        assert!(matches!(a.popup, Some(Popup::Project(_))));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ));
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(a.popup, Some(Popup::Approval(_))));
+        a.key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
+            .unwrap();
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(a.popup, Some(Popup::Approval(_))));
+        assert_eq!(a.input, "Keep this composer draft");
+        assert!(a.session.messages.is_empty());
+        assert_eq!(a.session.work.model_requests, 0);
+    }
+    #[test]
     fn inspecting_keeps_approval_and_question_channels_open() {
         let d = tempfile::tempdir().unwrap();
         let mut a = app(d.path());
@@ -2516,6 +2784,11 @@ mod layout_tests {
             terminal.draw(|f| a.draw(f)).unwrap();
             a.input_set("");
             a.command("/help").unwrap();
+            terminal.draw(|f| a.draw(f)).unwrap();
+            a.popup = None;
+            a.show_actions();
+            terminal.draw(|f| a.draw(f)).unwrap();
+            a.paste("commands do not match a very long query with repeated text to wrap around the terminal");
             terminal.draw(|f| a.draw(f)).unwrap();
             a.popup = None;
         }

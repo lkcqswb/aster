@@ -10,7 +10,7 @@ The primary interaction is a conversation with 弄玉, an explicitly fictional c
 - [Ratatui](https://ratatui.rs/): immediate rendering, responsive terminal layout, keyboard and mouse events.
 - [iTerm inline images](https://iterm2.com/documentation-images.html) and [Kitty graphics](https://sw.kovidgoyal.net/kitty/graphics-protocol/): actual raster frames in iTerm2, Ghostty and Kitty. Character-cell rendering is only a compatibility fallback.
 
-The visual language is ink, parchment and restrained jade: generous margins, almost no boxes, quiet dividers, one live status line. The companion owns the right third of a wide terminal. On narrow terminals the portrait gets smaller instead of burying the conversation. Modal controls temporarily cover the portrait and release graphics cleanly.
+The visual language is ink, parchment and restrained jade: generous margins, almost no boxes, quiet dividers, one live status line. The companion owns the right third of a wide terminal. On narrow terminals the portrait gets smaller instead of burying the conversation. Task controls stay beside the portrait when space permits; narrow layouts release graphics cleanly while showing a modal. F1 or a portrait click opens a restrained action list with a jade selection, muted descriptions, keyboard filtering and mouse activation.
 
 ## Character contract
 

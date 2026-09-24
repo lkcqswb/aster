@@ -1,3 +1,9 @@
+# Companion actions 0.13 — 2026-09-24
+
+- **68 Rust tests passed**, formatting, strict Clippy and release build passed. Coverage includes live menu availability, mouse hit targets, preserved decisions, pasted filters, skill selection retaining the existing request and compact layouts.
+- The real animated terminal opened the menu by clicking the portrait, opened files and live command output with mouse clicks, returned to a question, stopped an unapproved write before any file existed, and cancelled a running shell command. The stop action disappeared after completion. **45 distinct frames**, resize, zero API calls and exit 0. Evidence: `.aster/qa/actions-e2e.json`.
+- General terminal and context workflows passed. The final actual companion/action-menu preview was rendered and visually inspected: `.aster/qa/aster-actions.svg` and `.png`. Selected actions use jade, descriptions are muted, and the portrait remains visible beside the menu.
+
 # Decision inspection 0.12 — 2026-09-24
 
 - Rust: **65 tests passed**; formatting, strict Clippy and release build passed. Tests keep question/approval channels open across view switches, reject approval keystrokes in an inspection, preserve draft answers, and remove pending decisions on cancellation or redirection.

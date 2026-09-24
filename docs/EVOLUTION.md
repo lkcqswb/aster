@@ -60,4 +60,8 @@ A local, asynchronous file/search picker beside the companion, numbered source p
 
 Plans, diffs, command output, checks and files remain available while a decision is pending. The companion reads with you; the pending decision remains visible in her work card. Closing inspection restores the original answer draft or approval, while cancellation and redirection remove obsolete decisions. File attachments go into the composer without answering or submitting. A newer external file edit still invalidates the prepared approval.
 
-Next: make the companion's task controls easier to discover and strengthen long-running conversation management.
+## Delivered in 0.13
+
+Clicking the companion or pressing F1 opens searchable local actions. Command output and checks needing attention appear early; pending decisions can be resumed, inspected, redirected or stopped. Mouse selection and the scroll wheel work in the local views. The menu refreshes as work finishes so obsolete stop/redirect actions disappear. Opening controls preserves the composer and makes no model request. Choosing a skill or prompt prepends its invocation to the existing draft. Session and resource filters accept pasted text.
+
+Next: strengthen long-running conversation management and recovery.

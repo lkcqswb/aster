@@ -46,7 +46,7 @@ The companion pane is part of the terminal layout, not a separate window. iTerm2
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
-Her work card tracks the active plan step, file or command, pending decision, and recorded checks. Click her portrait or press **F2** to inspect the plan and evidence. **F3** reviews the exact file diffs from this turn. Questions and approval prompts stay beside her in a wide terminal, so she remains visible while you decide. Use `/demo work` to try the entire choice → approval → edit → verification flow without an API call. During a pending question or approval, F2–F6 open the plan, diffs, output, checks and files. Escape returns to the same decision with its typed answer or scroll position preserved. An inspection cannot approve an action; edits still reject any file changed since its diff was prepared.
+Her work card tracks the active plan step, file or command, pending decision, and recorded checks. Click her portrait or press **F1** for the searchable action menu; **F2** goes directly to the plan and evidence. **F3** reviews the exact file diffs from this turn. Questions and approval prompts stay beside her in a wide terminal, so she remains visible while you decide. Use `/demo work` to try the entire choice → approval → edit → verification flow without an API call. During a pending question or approval, F2–F6 open the plan, diffs, output, checks and files. Escape returns to the same decision with its typed answer or scroll position preserved. An inspection cannot approve an action; edits still reject any file changed since its diff was prepared.
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
 
@@ -95,6 +95,7 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/prompts`, `/prompt NAME args` | Browse and use reusable task prompts |
 | `/reload` | Refresh and inspect project resource discovery |
 | `/agents` | Inspect the AGENTS.md files loaded for this project |
+| `/together` | Open local companion controls; F1 or click her portrait |
 | `/files [name or glob]`, `/find TEXT` | Browse source and search beside 弄玉; F6 opens files |
 | `/init` | Create a small AGENTS.md starter, without replacing an existing one |
 | `/plan`, `/build` | Switch between reading/planning and work with tools |

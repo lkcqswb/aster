@@ -54,7 +54,7 @@ pub struct Cli {
     #[arg(long)]
     /// Save a preview of the terminal layout as SVG
     pub screenshot: Option<PathBuf>,
-    #[arg(long, requires = "screenshot", value_parser = ["skills", "context", "work", "review", "prompts", "output", "checks", "files", "find"])]
+    #[arg(long, requires = "screenshot", value_parser = ["skills", "context", "work", "review", "prompts", "output", "checks", "files", "find", "together"])]
     /// Open a read-only panel in an SVG preview; never submits a model request
     pub preview_panel: Option<String>,
     #[arg(long, default_value_t = 132)]

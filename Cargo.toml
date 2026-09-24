@@ -1,6 +1,6 @@
 [package]
 name = "aster"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 description = "A character-led terminal agent, with Nongyu Live2D"
 

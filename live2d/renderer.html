@@ -2,21 +2,24 @@
 <style>html,body{margin:0;background:#111318;overflow:hidden}canvas{display:block}</style>
 <canvas id="portrait"></canvas>
 <script src="vendor/pixi.min.js"></script><script src="vendor/live2dcubismcore.min.js"></script><script src="vendor/pixi-live2d-display-cubism4.min.js"></script>
+<script src="companion.js"></script>
 <script>
 'use strict';
 window.asterReady=false;window.asterError='';window.asterStage='initializing';
 window.asterLoading={requested:0,loaded:0,rig:false,textures:[],warnings:[]};
 const asterWarn=message=>{const list=window.asterLoading.warnings;if(list.length<24)list.push(String(message&&message.message||message).slice(0,240))};
-// Before she is ready a failure stops startup; afterwards (an optional motion or expression) it is only recorded.
+// Before she is ready a failure stops startup; afterwards (an optional resource) it is only recorded.
 window.addEventListener('error',event=>{const m=event.message||'Renderer resource failed';if(window.asterReady)asterWarn(m);else window.asterError=m;});
 window.addEventListener('unhandledrejection',event=>{const m=String(event.reason&&event.reason.message||event.reason||'Renderer promise failed');if(window.asterReady)asterWarn(m);else window.asterError=m;});
 (async()=>{
- const REF_W=420,REF_H=620,MIN_SIDE=160,MAX_SIDE=1400;
- let W=REF_W,H=REF_H;
+ // The canvas follows the terminal pane's pixel size (asterFrame's `view`), within these bounds.
+ const MIN_SIDE=160,MAX_SIDE=1400;
+ let W=420,H=620;
  const canvas=document.getElementById('portrait');
  const app=new PIXI.Application({view:canvas,width:W,height:H,backgroundColor:0x111318,antialias:true,preserveDrawingBuffer:true,autoStart:false});
  window.asterStage='reading renderer settings';
  const settings=await fetch('settings.json').then(r=>{if(!r.ok)throw Error('Renderer settings unavailable');return r.json()});
+ const profile=AsterCompanion.validateProfile(settings.profile);
  const textureLimit=Math.max(512,Math.min(4096,settings.texture_size||2048));
  const originalFromURL=PIXI.Texture.fromURL.bind(PIXI.Texture);
  PIXI.Texture.fromURL=async (url,options)=>{
@@ -39,41 +42,26 @@ window.addEventListener('unhandledrejection',event=>{const m=String(event.reason
   window.asterLoading.loaded++;
   return rendered;
  };
- window.asterStage='reading model definition';
- const modelUrl='model/'+encodeURIComponent('弄玉.model3.json');
- const definition=await fetch(modelUrl).then(r=>{if(!r.ok)throw Error('Model definition unavailable');return r.json()});
- const references=definition.FileReferences||{};
  window.asterStage='loading model and textures';
  let model;
  await new Promise((resolve,reject)=>{
-  model=PIXI.live2d.Live2DModel.fromSync(modelUrl,{autoInteract:false,autoUpdate:false,onLoad:resolve,onError:reject});
+  model=PIXI.live2d.Live2DModel.fromSync('model/'+encodeURIComponent(profile.model.split('/').pop()),{autoInteract:false,autoUpdate:false,onLoad:resolve,onError:reject});
   model.on('modelLoaded',()=>{window.asterLoading.rig=true});
  });
  window.asterStage='positioning model';
  app.stage.addChild(model);
-
- // ---- Framing --------------------------------------------------------------------------------
- // The tuned default: a 420x620 canvas, 2.70x the full-body fit, with the face anchor (19% down the
- // model) at 44% of the canvas height. Taller panes show more of her (up to about half the body);
- // wider or shorter panes stay a bust. The top of her hair keeps the same headroom throughout.
  model.scale.set(1);model.position.set(0,0);
- const measured=model.getBounds();
- const raw={x:measured.x,y:measured.y,width:measured.width,height:measured.height};
- const FACE=.19,FACE_Y=.44,ZOOM=2.70,REF_ASPECT=REF_W/REF_H;
- const refFraction=REF_H/(Math.min(REF_W/raw.width,REF_H/raw.height)*ZOOM*raw.height);
- const headroom=FACE-FACE_Y*refFraction;
+ const measured=model.getBounds();const raw={x:measured.x,y:measured.y,width:measured.width,height:measured.height};
+ // The profile's layout, applied to the current canvas size: zoom times the whole-model fit, with
+ // the model's anchor point placed at the canvas's center point (both as fractions).
  let framing={},framingChanged=true;
  const frameModel=()=>{
-  const aspect=W/H;
-  const fraction=aspect<REF_ASPECT
-   ?Math.min(Math.max(refFraction,.55),refFraction*REF_ASPECT/aspect)
-   :Math.max(refFraction*.8,refFraction*Math.pow(REF_ASPECT/aspect,.3));
-  const scale=H/(fraction*raw.height);
-  const anchor=Math.min(.5,Math.max(.28,(FACE-headroom)/fraction));
+  const {zoom,center,anchor}=profile.layout;
+  const scale=Math.min(W/raw.width,H/raw.height)*zoom;
   model.scale.set(scale);
-  model.x=W/2-scale*(raw.x+raw.width/2);
-  model.y=H*anchor-scale*(raw.y+raw.height*FACE);
-  framing={width:W,height:H,visible_fraction:Math.round(fraction*1000)/1000,face_at:Math.round(anchor*1000)/1000};
+  model.x=W*center[0]-scale*(raw.x+raw.width*anchor[0]);
+  model.y=H*center[1]-scale*(raw.y+raw.height*anchor[1]);
+  framing={width:W,height:H,zoom,scale:Math.round(scale*1e4)/1e4};
  };
  const resize=(width,height)=>{
   const w=Math.round(Math.min(MAX_SIDE,Math.max(MIN_SIDE,Number(width)||W)));
@@ -82,582 +70,34 @@ window.addEventListener('unhandledrejection',event=>{const m=String(event.reason
   W=w;H=h;app.renderer.resize(W,H);frameModel();framingChanged=true;
  };
  frameModel();
-
- // ---- Parameters -----------------------------------------------------------------------------
- const internal=model.internalModel,core=internal.coreModel;
- const call=(name,...args)=>{try{return typeof core[name]==='function'?core[name](...args):undefined}catch(_){return undefined}};
- let parameterIds=null;
- try{const m=core.getModel&&core.getModel();if(m&&m.parameters&&m.parameters.ids)parameterIds=Array.from(m.parameters.ids)}catch(_){}
- const parameterCount=Number(call('getParameterCount'))||(parameterIds?parameterIds.length:Infinity);
- // The Cubism framework hands out an index even for ids the rig lacks, so bound it by the real count.
- const indexOf=id=>{if(parameterIds)return parameterIds.indexOf(id);const i=call('getParameterIndex',id);return typeof i==='number'&&i>=0&&i<parameterCount?i:-1};
- const has=id=>indexOf(id)>=0;
- const group=name=>(((definition.Groups||[]).find(g=>g&&g.Name===name&&g.Target==='Parameter')||{}).Ids||[]).filter(has);
- const number=(v,fallback)=>typeof v==='number'&&isFinite(v)?v:fallback;
- const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
- const rnd=(a,b)=>a+Math.random()*(b-a);
- const round3=v=>Math.round(v*1000)/1000;
- const smooth=x=>x*x*(3-2*x);
- const warned=new Set();
- const warnOnce=message=>{if(!warned.has(message)){warned.add(message);asterWarn(message)}};
-
- // ---- Rig discovery ----------------------------------------------------------------------------
- // Display names and groups come from the model's DisplayInfo (cdi3.json); ranges from the core.
- window.asterStage='reading display names';
- const assetUrl=path=>'model/'+String(path).split('/').map(encodeURIComponent).join('/');
- const displayNames=new Map(),displayGroups=new Map();
- if(typeof references.DisplayInfo==='string'){
-  try{
-   const cdi=await fetch(assetUrl(references.DisplayInfo)).then(r=>r.ok?r.json():null);
-   const groupNames=new Map(((cdi&&cdi.ParameterGroups)||[]).map(g=>[g&&g.Id,String(g&&(g.Name||g.Id)||'')]));
-   for(const p of (cdi&&cdi.Parameters)||[]){
-    if(p&&typeof p.Id==='string'){displayNames.set(p.Id,String(p.Name||''));displayGroups.set(p.Id,groupNames.get(p.GroupId)||String(p.GroupId||''))}
-   }
-  }catch(e){asterWarn(e)}
- }
- const describe=id=>{
-  const i=indexOf(id);if(i<0)return null;
-  const min=number(call('getParameterMinimumValue',i),0),max=number(call('getParameterMaximumValue',i),1);
-  return {id,i,name:displayNames.get(id)||'',group:displayGroups.get(id)||'',min,max,def:number(call('getParameterDefaultValue',i),clamp(0,min,max))};
- };
- const rigParams=(parameterIds||[...displayNames.keys()].filter(has)).map(describe).filter(Boolean);
- const byId=new Map(rigParams.map(p=>[p.id,p]));
- // This rig's mouth-form/brow deformers are asymmetric. Keep their neutral values: never drive them.
- const PROTECTED=p=>/brow/i.test(p.id)||/mouth_?form/i.test(p.id)||/眉|嘴型/.test(p.name);
- // Words of an id or display name: camelCase, digits and punctuation split, lower case.
- const words=s=>String(s||'').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g,'$1 $2')
-  .replace(/([A-Za-z])([0-9])/g,'$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
- const LATIN=/^[a-z0-9]+$/;
- // A Latin keyword matches a whole word, its plural, or (5+ letters) a longer word it begins.
- // Other keywords (Chinese, Japanese, symbols) match anywhere in the text.
- const matches=(text,keywords,except=[])=>{
-  const s=String(text||'');if(!s||except.some(x=>s.includes(x)))return false;
-  const tokens=words(s),lower=s.toLowerCase();
-  return keywords.some(k=>LATIN.test(k)?tokens.some(t=>t===k||t===k+'s'||t===k+'es'||(k.length>=5&&t.startsWith(k))):lower.includes(k));
- };
- const matchParam=(p,keywords,except)=>matches(p.id.replace(/^Param/,''),keywords,except)||matches(p.name,keywords,except);
- const nameMatch=(names,keywords)=>{for(const k of keywords){const n=names.find(name=>matches(name,[k]));if(n)return n}return null};
-
- // ---- Procedural parameters --------------------------------------------------------------------
- // mode add: final = base + (ours - default), so an artist motion underneath blends instead of fighting.
- // mode mul: eyelids multiply, so a motion or expression that narrows her eyes still blinks.
- const SPEC={
-  ParamAngleX:['add',-30,30,0],ParamAngleY:['add',-30,30,0],ParamAngleZ:['add',-30,30,0],
-  ParamBodyAngleX:['add',-10,10,0],ParamBodyAngleZ:['add',-10,10,0],
-  ParamEyeBallX:['add',-1,1,0],ParamEyeBallY:['add',-1,1,0],ParamEyeLOpen:['mul',0,1,1],ParamEyeROpen:['mul',0,1,1],
-  ParamBreath:['add',0,1,0],ParamMouthOpenY:['add',0,1,0],ParamEyeLSmile:['add',0,1,0],ParamEyeRSmile:['add',0,1,0],
- };
- const eyeIds=['ParamEyeLOpen','ParamEyeROpen'].filter(has);if(!eyeIds.length)eyeIds.push(...group('EyeBlink'));
- const mouthIds=['ParamMouthOpenY'].filter(has);if(!mouthIds.length)mouthIds.push(...group('LipSync'));
- const procedural=new Set([...Object.keys(SPEC),...eyeIds,...mouthIds]);
- const driven=[],missing=[];
- const register=(id,spec)=>{
-  const known=driven.find(p=>p.id===id);if(known)return known;
-  const p=byId.get(id)||describe(id);
-  if(!p){missing.push(id);return null}
-  if(PROTECTED(p))return null;
-  const d={id,i:p.i,mode:spec[0],min:number(p.min,spec[1]),max:number(p.max,spec[2]),def:number(p.def,spec[3]),out:0};
-  d.out=d.def;driven.push(d);return d;
- };
- for(const [id,spec] of Object.entries(SPEC))register(id,spec);
- for(const id of eyeIds)register(id,['mul',0,1,1]);
- for(const id of mouthIds)register(id,['add',0,1,0]);
-
- // ---- Emotion toggles and arms, found by keyword -----------------------------------------------
- const CATEGORY_WORDS={
-  blush:{words:['blush','cheek','flush','脸红','红晕','腮红','害羞','红脸','羞红','赤面','照れ']},
-  tear:{words:['tear','teer','teardrop','cry','crying','weep','weeping','泪','哭','涙']},
-  heart:{words:['heart','love','爱心','心','ハート'],except:['中心','重心','比心','心情']},
-  star:{words:['star','sparkle','twinkle','glitter','星','闪闪','キラ']},
-  angry:{words:['angry','anger','mad','rage','生气','怒','黑脸','青筋']},
-  sweat:{words:['sweat','汗']},
-  surprise:{words:['surprise','shock','shocked','惊','びっくり']},
-  question:{words:['question','doubt','问号','疑','？','?']},
-  dizzy:{words:['dizzy','spiral','swirl','晕','圈圈','眩','ぐるぐる']},
-  smile:{words:['smile','smiling','happy','joy','笑','眯','开心']},
-  pout:{words:['pout','嘟嘴','嘟','撅嘴']},
-  tongue:{words:['tongue','吐舌','舌']},
-  sleepy:{words:['sleepy','sleep','tired','drowsy','zzz','困','睡','眠']},
-  shadow:{words:['shadow','gloom','阴影','阴暗','黑线']},
- };
- const EMOTIONS=['neutral','happy','laugh','shy','love','excited','surprised','confused','thinking','sad','cry','angry','pout','embarrassed','sleepy','proud','worried','dizzy'];
- const EMOTION_TOGGLES={
-  neutral:{},happy:{smile:.6},laugh:{smile:1,blush:.5},shy:{blush:1},love:{heart:1,blush:.7},
-  excited:{star:1,smile:.6,blush:.4},surprised:{surprise:1},confused:{question:1,sweat:.5},thinking:{},
-  sad:{tear:.5,shadow:.7},cry:{tear:1,shadow:.4},angry:{angry:1,shadow:.5},pout:{pout:1,blush:.5},
-  embarrassed:{blush:1,sweat:.8,tongue:.8},sleepy:{sleepy:1},proud:{star:.6,smile:.5},worried:{sweat:1,shadow:.4},
-  dizzy:{dizzy:1,sweat:.5},
- };
- // Earlier tuning for this rig, kept alongside whatever the keywords find.
- const KNOWN_TOGGLES={ParamHeartEye:{love:1},ParamTeers3:{love:1,angry:1},ParamTeers2:{angry:1,cry:1,sad:.6},ParamTeers5:{angry:1,cry:1}};
- // Expression and motion group names for each emotion.
- const EMOTION_WORDS={
-  neutral:['neutral','normal','default','普通','默认','正常','通常'],
-  happy:['happy','joy','smile','开心','高兴','喜','笑'],laugh:['laugh','laughing','大笑','哈哈','爆笑'],
-  shy:['shy','blush','害羞','羞','脸红'],love:['love','heart','爱','心'],excited:['excited','excite','兴奋','激动','星星'],
-  surprised:['surprise','surprised','shock','惊','吃惊'],confused:['confuse','confused','question','困惑','疑','问号'],
-  thinking:['think','thinking','ponder','思考'],sad:['sad','sorrow','难过','伤心','悲','哀'],
-  cry:['cry','crying','tear','tears','哭','泪'],angry:['angry','anger','mad','生气','怒'],pout:['pout','嘟嘴','撅嘴','嘟'],
-  embarrassed:['embarrass','embarrassed','awkward','尴尬','汗'],sleepy:['sleep','sleepy','tired','困','睡'],
-  proud:['proud','smug','得意','骄傲'],worried:['worry','worried','anxious','担心','忧','焦虑'],dizzy:['dizzy','晕','眩'],
- };
- const ARM_WORDS=['arm','hand','elbow','wrist','手','臂','胳膊','肘','腕','挥','比心','托腮'];
- const ROLE_WORDS=[['chin',['chin','托腮','腮','下巴']],['heart',['heart','比心','爱心']],['cover',['cover','捂','遮']],
-  ['wave',['wave','waving','挥','摆手','招手']],['raise',['raise','lift','up','抬','举']]];
- const sideOf=p=>{
-  if(/左/.test(p.name))return 'L';if(/右/.test(p.name))return 'R';
-  const m=p.id.match(/(Left|Right)|(?:Arm|Hand|Elbow|Wrist)_?(L|R)(?![a-z])|(?:^|_)(L|R)(?:_|$)/);
-  return m?(m[1]||m[2]||m[3])[0]:'';
- };
- const arms=[],categories={};
- for(const p of rigParams){
-  if(PROTECTED(p)||procedural.has(p.id))continue;
-  if(matchParam(p,ARM_WORDS)){
-   const role=(ROLE_WORDS.find(([,k])=>matchParam(p,k))||['arm'])[0];
-   arms.push({id:p.id,side:sideOf(p),role,p});continue;
-  }
-  for(const [category,{words:keywords,except}] of Object.entries(CATEGORY_WORDS)){
-   // A smile toggle on the mouth would be a mouth-form shape; leave those alone.
-   if(category==='smile'&&(/mouth/i.test(p.id)||/嘴|口/.test(p.name)))continue;
-   if(matchParam(p,keywords,except))(categories[category]=categories[category]||[]).push(p.id);
-  }
- }
- const expressions=(references.Expressions||[]).map((e,index)=>({name:String(e&&(e.Name||e.File)||index),index}));
- const expressionNames=expressions.map(e=>e.name);
- const motionDefs=references.Motions||{};
- const motionGroups=Object.keys(motionDefs).filter(g=>Array.isArray(motionDefs[g])&&motionDefs[g].length);
- const findGroup=(...patterns)=>{for(const re of patterns){const g=motionGroups.find(name=>re.test(name));if(g)return g}return null};
- const idleGroup=findGroup(/^idle/i,/idle/i),tapGroup=findGroup(/^tap/i,/tap/i);
- const toggleValue=(p,weight)=>round3(p.def+(p.max-p.def)*weight);
- const rig={
-  parameters:rigParams.map(p=>({id:p.id,name:p.name,group:p.group,min:round3(p.min),max:round3(p.max),default:round3(p.def)})),
-  expressions:expressionNames,motions:Object.fromEntries(motionGroups.map(g=>[g,motionDefs[g].length])),
-  protected:rigParams.filter(PROTECTED).map(p=>p.id),categories,arms:arms.map(({id,side,role})=>({id,side,role})),
-  emotions:{},gestures:{},
- };
- for(const emotion of EMOTIONS){
-  const weights=new Map();
-  for(const [category,w] of Object.entries(EMOTION_TOGGLES[emotion]))for(const id of categories[category]||[])weights.set(id,Math.max(weights.get(id)||0,w));
-  for(const [id,map] of Object.entries(KNOWN_TOGGLES)){
-   const p=byId.get(id);
-   if(map[emotion]&&p&&!PROTECTED(p)&&!procedural.has(id))weights.set(id,Math.max(weights.get(id)||0,map[emotion]));
-  }
-  rig.emotions[emotion]={params:[...weights].map(([id,w])=>({id,value:toggleValue(byId.get(id),w)})),
-   expression:nameMatch(expressionNames,EMOTION_WORDS[emotion]),motion:nameMatch(motionGroups,EMOTION_WORDS[emotion])};
- }
- // Gestures: a motion group by name, else arm/hand parameters, else a head and body version.
- const GESTURES=['wave','nod','shake','tilt','think','cheer','heart','cover','stretch','look_around','fidget','bow'];
- const GESTURE_WORDS={
-  wave:['wave','waving','hello','hi','bye','挥手','招手','打招呼','再见'],nod:['nod','nodding','点头'],
-  shake:['shake','摇头'],tilt:['tilt','歪头','侧头'],think:['think','thinking','ponder','思考','托腮'],
-  cheer:['cheer','hooray','yay','celebrate','欢呼','加油','庆祝'],heart:['heart','比心','爱心'],
-  cover:['cover','捂嘴','捂脸','遮脸'],stretch:['stretch','伸懒腰','懒腰','伸展'],
-  look_around:['lookaround','look','around','张望','环顾'],fidget:['fidget','小动作','晃'],bow:['bow','鞠躬','行礼','致意'],
- };
- const armFor=(role,side)=>arms.find(a=>a.role===role&&a.side===side)||arms.find(a=>a.role===role);
- const upperArm=side=>arms.find(a=>a.role==='arm'&&(!side||a.side===side)&&matchParam(a.p,['arm','臂','胳膊']));
- const lift=(p,f)=>round3(p.def+(p.max-p.def)*f);
- const swing=p=>p.def>p.min+1e-6?[round3(p.def-(p.def-p.min)*.7),round3(p.def+(p.max-p.def)*.7)]:[lift(p,.3),lift(p,1)];
- const holdAll=role=>arms.filter(a=>a.role===role).slice(0,2).map(a=>({id:a.id,value:lift(a.p,1)}));
- const ARM_PLANS={
-  wave:()=>{
-   const w=armFor('wave','R'),side=w?w.side||'R':'R',r=armFor('raise',side)||upperArm(side)||upperArm('');
-   const out=[];
-   if(r)out.push(w?{id:r.id,value:lift(r.p,.9)}:{id:r.id,values:[lift(r.p,.7),lift(r.p,1)]});
-   if(w)out.push({id:w.id,values:swing(w.p)});
-   return out;
-  },
-  cheer:()=>{let list=arms.filter(a=>a.role==='raise');if(!list.length)list=['L','R'].map(upperArm).filter(Boolean);return list.slice(0,2).map(a=>({id:a.id,values:[lift(a.p,.85),lift(a.p,1)]}))},
-  think:()=>{const c=armFor('chin','R');return c?[{id:c.id,value:lift(c.p,1)}]:[]},
-  heart:()=>holdAll('heart'),cover:()=>holdAll('cover'),stretch:()=>holdAll('raise'),
- };
- for(const gesture of GESTURES){
-  const motion=nameMatch(motionGroups.filter(g=>g!==idleGroup&&g!==tapGroup),GESTURE_WORDS[gesture]);
-  const params=motion?[]:(ARM_PLANS[gesture]?ARM_PLANS[gesture]():[]);
-  rig.gestures[gesture]={params,motion,kind:motion?'motion':params.length?'params':'procedural'};
- }
- // User overrides (aster-nongyu.json), validated by Aster, merged over what was found.
- const overrides=settings.emotion_map&&typeof settings.emotion_map==='object'?settings.emotion_map:{};
- const exactName=(list,name)=>list.find(n=>n.toLowerCase()===String(name).toLowerCase())||null;
- for(const kind of ['emotions','gestures']){
-  for(const [name,o] of Object.entries(overrides[kind]||{})){
-   const where=`nongyu.json ${kind}.${name}`;
-   const entry=rig[kind][name]||(rig[kind][name]=kind==='emotions'?{params:[],expression:null,motion:null}:{params:[],motion:null,kind:'procedural'});
-   for(const [id,v] of Object.entries(o.params||{})){
-    entry.params=entry.params.filter(x=>x.id!==id);
-    if(v===null)continue;
-    const p=byId.get(id);
-    if(!p){warnOnce(`${where}: the rig has no ${id}`);continue}
-    if(PROTECTED(p)){warnOnce(`${where}: ${id} is protected and never driven`);continue}
-    if(procedural.has(id)){warnOnce(`${where}: ${id} follows her procedural motion and cannot be overridden`);continue}
-    entry.params.push(Array.isArray(v)?{id,values:v.map(n=>round3(clamp(n,p.min,p.max)))}:{id,value:round3(clamp(v,p.min,p.max))});
-   }
-   for(const field of ['expression','motion']){
-    if(!(field in o)||(field==='expression'&&kind!=='emotions'))continue;
-    if(o[field]===null){entry[field]=null;continue}
-    const found=exactName(field==='expression'?expressionNames:motionGroups,o[field]);
-    if(found)entry[field]=found;else warnOnce(`${where}: the model has no ${field} ${o[field]}`);
-   }
-   if(kind==='gestures')entry.kind=entry.motion?'motion':entry.params.length?'params':(GESTURES.includes(name)?'procedural':'none');
-   entry.override=true;
-  }
- }
- // Every parameter an emotion or gesture may use joins the layer; at rest it adds nothing.
- const toggles=new Map();
- const addToggle=(id,w)=>{if(toggles.has(id))return;const d=register(id,['add',0,1,0]);if(d)toggles.set(id,{d,s:new Spring(d.def,w)})};
-
- // ---- Layer application ------------------------------------------------------------------------
- const write=(p,v)=>call('setParameterValueByIndex',p.i,Math.min(p.max,Math.max(p.min,v)));
- const read=p=>number(call('getParameterValueByIndex',p.i),p.def);
- const resetLayer=()=>{for(const p of driven)write(p,p.def)};
- const applyLayer=()=>{for(const p of driven){const base=read(p);write(p,p.mode==='mul'?base*p.out:base+p.out-p.def)}};
- const drives=id=>driven.some(p=>p.id===id);
- // Our own blink and breathing replace the SDK's fixed-rhythm versions of the same parameters.
- const quiet={updateParameters(){}};
- if(internal.eyeBlink&&eyeIds.some(drives))internal.eyeBlink=quiet;
- if(internal.breath&&['ParamAngleX','ParamAngleY','ParamBreath'].some(drives))internal.breath=quiet;
- // Apply after motions and before physics, so hair and accessories follow her head. Older builds
- // without the motion events fall back to the pre-render hook.
- let hook='beforeModelUpdate',applied=false;
- internal.on('beforeMotionUpdate',resetLayer);
- internal.on('afterMotionUpdate',()=>{hook='afterMotionUpdate';applyLayer();applied=true});
- internal.on('beforeModelUpdate',()=>{if(!applied)applyLayer();applied=false});
-
- // ---- Motions and expressions ------------------------------------------------------------------
- const mm=internal.motionManager||{};
- // Idle motions are played occasionally by us, not back to back by the library.
- if(idleGroup&&mm.groups)mm.groups.idle='\u0000aster-scheduled-idle';
- const motionPlaying=()=>!!mm.playing;
- const play=(name,priority)=>{
-  try{return Promise.resolve(model.motion(name,undefined,priority)).catch(e=>{asterWarn(e);return false})}
-  catch(e){asterWarn(e);return Promise.resolve(false)}
- };
- let currentExpression=null;
- const showExpression=name=>{
-  if(name===currentExpression)return;
-  currentExpression=name;
-  try{
-   if(name){const e=expressions.find(x=>x.name===name);Promise.resolve(model.expression(e.index)).catch(asterWarn)}
-   else if(mm.expressionManager)mm.expressionManager.resetExpression();
-  }catch(e){asterWarn(e)}
- };
-
- // ---- Motion system ----------------------------------------------------------------------------
- // Critically damped spring: continuous velocity, no overshoot, exact for any frame time.
- function Spring(x,w){this.x=x;this.v=0;this.w=w}
- Spring.prototype.step=function(target,dt){const w=this.w,d=this.x-target,e=Math.exp(-w*dt),k=(this.v+w*d)*dt;this.v=(this.v-w*k)*e;this.x=target+(d+k)*e;return this.x};
- for(const e of Object.values(rig.emotions))for(const x of e.params)addToggle(x.id,16);
- for(const g of Object.values(rig.gestures))for(const x of g.params)addToggle(x.id,14);
- // Layered 1-D gradient noise: slow drift that never repeats like a pure sine.
- const noise=(()=>{
-  const g=Array.from({length:256},()=>Math.random()*2-1);
-  const n=x=>{const i=Math.floor(x),f=x-i,u=f*f*f*(f*(f*6-15)+10),a=g[i&255]*f,b=g[(i+1)&255]*(f-1);return 2*(a+(b-a)*u)};
-  return (x,seed)=>n(x+seed)*.62+n(x*2.03+seed*1.7+31.4)*.26+n(x*4.11+seed*2.3+77.7)*.12;
- })();
- // gaze: eye units (-1..1, negative X is toward the conversation on her left of the screen, positive Y is up)
- // head: extra head pose [x,y,z] in degrees; lid: resting eyelid opening; sway: idle motion amount.
- const STATES={
-  idle:{gaze:[0,0],head:[0,0,0],wander:.22,sway:1,lid:1,saccade:[.8,2.3],breath:3.6},
-  listening:{gaze:[0,.12],head:[0,-1.5,3.5],wander:.07,sway:.75,lid:1,saccade:[.6,1.8],breath:3.4},
-  waiting:{gaze:[0,.02],head:[0,1.5,2.5],wander:.12,sway:.9,lid:1,saccade:[.7,2.2],breath:3.6},
-  thinking:{gaze:[-.48,.42],head:[0,1,-2.5],wander:.1,sway:.6,lid:.82,saccade:[1.2,2.5],breath:4.2},
-  reading:{gaze:[-.55,-.32],head:[0,-2,-1],wander:.05,sway:.5,lid:.9,saccade:[.25,.5],breath:3.9,scan:true},
-  checking:{gaze:[-.5,-.28],head:[0,-1.5,0],wander:.05,sway:.5,lid:.92,saccade:[.3,.7],breath:3.9,scan:true},
-  working:{gaze:[-.38,-.22],head:[0,-2,0],wander:.12,sway:.6,lid:.95,saccade:[.6,1.6],breath:3.8},
-  speaking:{gaze:[0,.03],head:[0,1,0],wander:.08,sway:1.15,lid:1,saccade:[.6,2],breath:3.0},
-  pleased:{gaze:[0,.06],head:[0,2,4],wander:.08,sway:.95,lid:1,saccade:[.8,2.2],breath:3.4,smile:.45},
-  concerned:{gaze:[.04,-.22],head:[0,-3,-3],wander:.08,sway:.55,lid:.74,saccade:[.8,2.2],breath:3.3},
- };
- // Emotion poses work on any rig: head, gaze and eyelids, sway and breathing, and small extras.
- const POSE={
-  neutral:{},happy:{smile:.45,head:[0,1.5,3],sway:1.15,breath:3.3},
-  laugh:{smile:1,head:[0,3,4],bounce:1,laugh:1,lid:.9,breath:2.6,sway:1.2},
-  shy:{smile:.3,head:[3,-4,6],gaze:[.35,-.3],lid:.85,sway:.7},love:{smile:.6,head:[0,2,5],sway:1.1},
-  excited:{smile:.65,head:[0,4,0],bounce:.8,sway:1.4,breath:2.6},
-  surprised:{head:[0,5,0],lid:1.15,mouth:.45,sway:.6,jolt:1,still:1.4},
-  confused:{head:[0,1,-9],gaze:[.3,.3],lid:.92,sway:.8},thinking:{head:[0,2,-4],gaze:[-.45,.45],lid:.84,sway:.6},
-  sad:{head:[0,-6,-3],gaze:[0,-.35],lid:.72,sway:.5,breath:4.4},
-  cry:{head:[0,-7,-4],gaze:[0,-.3],lid:.55,sway:.6,sob:1,breath:3,blink:[1,2.5]},
-  angry:{head:[0,-3,0],gaze:[0,-.05],lid:.8,sway:.6,breath:2.8},pout:{head:[-4,-1,-5],gaze:[-.35,0],lid:.88,sway:.7},
-  embarrassed:{smile:.35,head:[4,-5,5],gaze:[.4,-.3],lid:.85,sway:.8},
-  sleepy:{head:[0,-5,-6],lid:.4,sway:.5,breath:5,doze:1,blink:[1.5,4],slowBlink:1},
-  proud:{smile:.45,head:[0,5,2],lid:.85,gaze:[0,.05]},worried:{head:[0,-3,-3],gaze:[-.15,-.2],lid:.8,sway:.85},
-  dizzy:{head:[0,-1,0],lid:.7,swirl:1,sway:.6},
- };
- const ALIASES={heart:'love',blush:'shy',tears:'cry',tear:'cry',crying:'cry',surprise:'surprised',shock:'surprised',confuse:'confused',
-  question:'confused',think:'thinking',sleep:'sleepy',tired:'sleepy',worry:'worried',embarrass:'embarrassed',excite:'excited',joy:'happy',
-  smile:'happy',mad:'angry',anger:'angry',upset:'sad',laughing:'laugh'};
- // How much idle life each work state keeps, and where she may fidget on her own.
- const LIVELY={idle:1,waiting:1,pleased:.9,listening:.6,speaking:.7,working:.45,thinking:.4,reading:.35,checking:.35,concerned:.5};
- const FIDGET_STATES=new Set(['idle','waiting']);
- const CALM=new Set(['idle','listening','waiting','pleased']);
- const S={
-  attX:new Spring(0,9),attY:new Spring(0,9),turnX:new Spring(0,4.5),turnY:new Spring(0,4.5),
-  biasX:new Spring(0,2.5),biasY:new Spring(0,2.5),biasZ:new Spring(0,2.5),nod:new Spring(0,6),tilt:new Spring(0,6),
-  eyeX:new Spring(0,16),eyeY:new Spring(0,16),lid:new Spring(1,5),sway:new Spring(1,1.2),smile:new Spring(0,5),
-  breathT:new Spring(3.6,1),talk:new Spring(0,3),bounce:new Spring(0,3),sob:new Spring(0,3),doze:new Spring(0,2),
-  swirl:new Spring(0,3),laugh:new Spring(0,4),mouth:new Spring(0,8),shiftX:new Spring(0,1.3),shiftZ:new Spring(0,1.3),lifeTilt:new Spring(0,2.2),
- };
- let t=0,state='idle',baseMood='neutral',transient='',speech=0,lookUntil=-1,thinkSide=-1,lastGaze=[0,0];
- let offset=[0,0],glance=[0,0],glanceUntil=0,nextSaccade=.5,scan=-.16,line=0;
- let breathPhase=Math.random()*Math.PI*2,tapSmileUntil=-1,lastNod=-9,lastTapMotion=-9,lastEmphasis=-9;
- const blink={phase:'open',at:0,next:rnd(1.2,3.5),second:false,shown:false,shownAt:0};
- // 0 = open, 1 = shut. Fast accelerating close, slower easing open; the shut pose is always drawn once.
- const blinkStep=pose=>{
-  const slow=pose.slowBlink?1:0,CLOSE=.07+.08*slow,HOLD=.03+.12*slow,OPEN=.13+.25*slow,[a,b]=pose.blink||[2,6];
-  if(blink.phase==='open'){if(t<blink.next)return 0;blink.phase='closing';blink.at=blink.next}
-  if(blink.phase==='closing'){const p=(t-blink.at)/CLOSE;if(p<1)return p*p;blink.phase='closed';blink.at+=CLOSE;blink.shown=false}
-  if(blink.phase==='closed'){
-   if(!blink.shown){blink.shown=true;blink.shownAt=t;return 1}
-   if(t-blink.at<HOLD)return 1;
-   blink.phase='opening';blink.at=Math.max(blink.at+HOLD,blink.shownAt);
-  }
-  const p=(t-blink.at)/OPEN;if(p<1)return (1-p)*(1-p);
-  blink.phase='open';
-  if(!blink.second&&Math.random()<.15){blink.second=true;blink.next=t+rnd(.08,.18)}else{blink.second=false;blink.next=t+rnd(a,b)}
-  return 0;
- };
- const blinkSoon=(chance,within)=>{if(blink.phase==='open'&&Math.random()<chance)blink.next=Math.min(blink.next,t+rnd(0,within))};
- // Speech: syllable-like pulses of random length and strength, short closures between them, and a
- // smooth close once the text stops. Energy comes from the recent characters-per-second of the reply.
- const speechEnergy=()=>speech>0?1-Math.exp(-speech/24):0;
- const lips={v:0,active:false,start:0,dur:0,amp:0,rest:0};
- const lipsStep=dt=>{
-  const energy=speechEnergy();
-  const shape=()=>lips.amp*Math.pow(Math.max(0,Math.sin(Math.PI*(t-lips.start)/lips.dur)),.7);
-  let target=0;
-  if(lips.active){
-   if(t-lips.start>=lips.dur){lips.active=false;const r=Math.random();lips.rest=t+(r<.15?rnd(.12,.26):r<.75?rnd(.03,.08):0)}
-   else target=shape();
-  }
-  if(!lips.active&&energy>.04&&t>=lips.rest){
-   const stressed=Math.random()<.18;
-   lips.active=true;lips.dur=rnd(.09,.18);lips.start=t-lips.dur*rnd(.2,.5);
-   lips.amp=Math.min(1,energy*rnd(.45,1)*(stressed?1.3:1));target=shape();
-   // A stressed syllable carries a small nod, as emphasis does.
-   if(stressed&&energy>.3&&t-lastEmphasis>.6){S.nod.v-=14;lastEmphasis=t}
-  }
-  const tau=target>lips.v?.03:(energy>0?.05:.09);
-  lips.v+=(target-lips.v)*(1-Math.exp(-dt/tau));
-  if(energy===0&&!lips.active&&lips.v<.01)lips.v=0;
-  return lips.v;
- };
- const saccade=looking=>{
-  const cfg=STATES[state];nextSaccade=t+rnd(cfg.saccade[0],cfg.saccade[1]);
-  if(cfg.scan&&!looking){ // reading: short hops along a line, then a return sweep to the next
-   scan+=rnd(.06,.11);if(scan>.16){scan=-.16;line=(line+1)%4}
-   offset=[scan,-.05*line+rnd(-.015,.015)];return;
-  }
-  const w=looking?.04:cfg.wander;offset=[rnd(-w,w),rnd(-w,w)*.6];
-  if(!looking&&(state==='idle'||state==='waiting')&&Math.random()<.16){glance=[rnd(-.5,.5),rnd(-.2,.3)];glanceUntil=t+rnd(.8,1.6)}
- };
- const setState=next=>{
-  state=next;glance=[0,0];
-  if(next==='thinking')thinkSide=Math.random()<.7?-1:1;
-  if(STATES[next].scan){scan=-.16-rnd(0,.05);line=0}
-  nextSaccade=Math.min(nextSaccade,t+rnd(.05,.25));
- };
-
- // ---- Emotions: a base mood plus a transient emotion that overrides it until it expires ---------
- const resolveEmotion=name=>{
-  const raw=String(name||'').trim();if(!raw)return null;
-  const k=raw.toLowerCase(),key=rig.emotions[k]?k:(ALIASES[k]&&rig.emotions[ALIASES[k]]?ALIASES[k]:null);
-  if(key)return {key,pose:POSE[key]||{},...rig.emotions[key]};
-  const expression=exactName(expressionNames,raw);
-  if(expression)return {key:expression,pose:{},params:[],expression,motion:null};
-  warnOnce(`unknown emotion ${raw.slice(0,64)}`);return null;
- };
- let emotion=null,emotionInputs=null;
- const currentEmotion=()=>{
-  const inputs=transient+'\u0000'+baseMood;
-  if(inputs===emotionInputs)return emotion;
-  emotionInputs=inputs;
-  const next=resolveEmotion(transient)||resolveEmotion(baseMood)||{key:'neutral',pose:{},...rig.emotions.neutral};
-  if(!emotion||next.key!==emotion.key){
-   showExpression(next.expression||null);
-   if(next.motion&&!(gesture&&gesture.kind==='motion'))play(next.motion,2);
-   if(next.pose.jolt)S.nod.v+=40;
-   if(next.pose.still&&blink.phase==='open')blink.next=Math.max(blink.next,t+next.pose.still);
-   else blinkSoon(.4,.12);
-  }
-  emotion=next;return emotion;
- };
-
- // ---- Gestures ---------------------------------------------------------------------------------
- const GESTURE_TIME={wave:2.4,nod:1.2,shake:1.5,tilt:1.8,think:3.2,cheer:2.0,heart:2.6,cover:2.4,stretch:3.2,look_around:3.4,fidget:1.6,bow:2.0};
- const envelope=(s,dur,attack,release)=>smooth(clamp(s/attack,0,1))*smooth(clamp((dur-s)/release,0,1));
- // Head and body versions. o: head x/y/z and body bx/bz in degrees, gaze [x,y,weight],
- // smile, lid multiplier, mouth, and an emotion whose toggles join in.
- const PROC={
-  nod:(s,g,o)=>{o.y-=5*Math.pow(Math.sin(Math.PI*Math.min(s,1)/.5),2)*envelope(s,g.dur,.08,.3)},
-  shake:(s,g,o)=>{o.x+=6*Math.sin(2*Math.PI*s/.9)*envelope(s,g.dur,.15,.35)},
-  tilt:(s,g,o)=>{const e=envelope(s,g.dur,.5,.5);o.z+=8*g.side*e;o.x+=2*g.side*e;o.smile+=.2*e},
-  think:(s,g,o)=>{const e=envelope(s,g.dur,.5,.5);o.z-=6*e;o.y+=2*e;o.gaze=[-.4,.45,e];o.lid*=1-.12*e},
-  cheer:(s,g,o)=>{const e=envelope(s,g.dur,.3,.4);o.y+=3*e+3.5*e*Math.pow(Math.sin(Math.PI*1.6*s),2);o.smile+=.8*e;o.emotion=['excited',e]},
-  heart:(s,g,o)=>{const e=envelope(s,g.dur,.4,.5);o.z+=6*e;o.y+=1.5*e;o.smile+=.5*e;o.emotion=['love',e]},
-  cover:(s,g,o)=>{const e=envelope(s,g.dur,.4,.5);o.y-=5*e;o.z+=4*e;o.smile+=.5*e;o.gaze=[.2,-.3,e];o.emotion=['shy',e]},
-  stretch:(s,g,o)=>{const e=envelope(s,g.dur,.6,.6),mid=Math.pow(Math.sin(Math.PI*clamp(s/g.dur,0,1)),2);
-   o.y+=8*e;o.bz+=3*Math.sin(2*Math.PI*s/g.dur)*e;o.lid*=1-.75*mid;o.mouth=Math.max(o.mouth,.35*mid)},
-  look_around:(s,g,o)=>{const u=s/g.dur;o.gaze=[.7*Math.sin(2*Math.PI*u)*g.side,.1+.2*Math.sin(4*Math.PI*u),envelope(s,g.dur,.4,.6)]},
-  fidget:(s,g,o)=>{const e=envelope(s,g.dur,.3,.4);o.z+=2.5*Math.sin(2*Math.PI*s/.8)*e;o.bx+=2*g.side*e;o.gaze=[.3*g.side,0,.6*e];o.smile+=.12*e},
-  wave:(s,g,o)=>{const e=envelope(s,g.dur,.3,.4);o.z+=3*Math.sin(2*Math.PI*1.6*s)*e;o.smile+=.45*e;o.gaze=[0,.05,e]},
-  bow:(s,g,o)=>{const e=envelope(s,g.dur,.5,.6);o.y-=12*e;o.lid*=1-.6*e},
- };
- const OSCILLATE={wave:1.6,cheer:2.2};
- const armValue=(x,s,g)=>{
-  const v=x.values;if(!v)return x.value;if(v.length===1)return v[0];
-  if(v.length===2)return v[0]+(v[1]-v[0])*(.5-.5*Math.cos(2*Math.PI*(OSCILLATE[g.name]||1.2)*s));
-  const pos=clamp(s/g.dur,0,1)*(v.length-1),i=Math.min(v.length-2,Math.floor(pos));
-  return v[i]+(v[i+1]-v[i])*smooth(pos-i);
- };
- let gesture=null,actions=0,lastAction=null;
- const queue=[];
- const resolveAct=name=>{
-  const raw=String(name||'').trim(),k=raw.toLowerCase().replace(/[\s-]+/g,'_');
-  if(rig.gestures[k]&&rig.gestures[k].kind!=='none')return {name:k,...rig.gestures[k]};
-  const group=exactName(motionGroups,raw);
-  if(group)return {name:group,params:[],motion:group,kind:'motion'};
-  warnOnce(`unknown gesture ${raw.slice(0,64)}`);return null;
- };
- const startGesture=(name,source)=>{
-  const spec=resolveAct(name);if(!spec)return false;
-  const g={name:spec.name,spec,kind:spec.kind,start:t,dur:GESTURE_TIME[spec.name]||2.4,side:Math.random()<.5?-1:1,source,motion:'none'};
-  if(spec.kind==='motion'){g.motion='loading';play(spec.motion,source==='life'?1:3).then(ok=>{g.motion=ok?'playing':'failed'})}
-  gesture=g;actions++;lastAction={name:g.name,kind:g.kind,source};
-  return true;
- };
- const gestureStep=()=>{
-  const o={x:0,y:0,z:0,bx:0,bz:0,gaze:null,smile:0,lid:1,mouth:0,emotion:null,params:[]};
-  if(!gesture&&queue.length)startGesture(queue.shift(),'act');
-  if(!gesture)return o;
-  const g=gesture,s=t-g.start;
-  const done=g.kind==='motion'?g.motion==='failed'||(g.motion==='playing'&&s>.2&&!motionPlaying())||s>12:s>=g.dur;
-  if(done){gesture=null;return o}
-  if(g.kind==='motion')return o;
-  if(PROC[g.name])PROC[g.name](s,g,o);
-  if(g.kind==='params'){const e=envelope(s,g.dur,.35,.45);for(const x of g.spec.params)o.params.push([x.id,armValue(x,s,g),e])}
-  return o;
- };
- const react=()=>{ // a tap: a small nod, a brief smile, maybe a blink and the rig's own tap motion
-  if(t-lastNod>1.2){S.nod.v-=55;S.tilt.v+=rnd(-18,18);lastNod=t}
-  tapSmileUntil=t+.8;blinkSoon(.5,.2);
-  if(tapGroup&&t-lastTapMotion>4&&!gesture){lastTapMotion=t;play(tapGroup,2)}
- };
-
- // ---- Never standing still: weight shifts, head tilts, small smiles and occasional fidgets -------
- const life={shift:[0,0],nextShift:rnd(3,7),tilt:0,tiltUntil:0,nextTilt:rnd(4,10),smile:0,smileUntil:0,nextSmile:rnd(6,16),nextFidget:rnd(12,30)};
- const fidget=()=>{
-  const options=['fidget','fidget','tilt','tilt','look_around'];
-  if(idleGroup)options.push('@idle','@idle');
-  if(Math.random()<.08)options.push('stretch');
-  const pick=options[Math.floor(Math.random()*options.length)];
-  if(pick==='@idle'){
-   const g={name:idleGroup,spec:{motion:idleGroup},kind:'motion',start:t,dur:12,side:1,source:'life',motion:'loading'};
-   play(idleGroup,1).then(ok=>{g.motion=ok?'playing':'failed'});
-   gesture=g;actions++;lastAction={name:idleGroup,kind:'motion',source:'life'};
-  }else startGesture(pick,'life');
- };
- const lifeStep=dt=>{
-  const lively=LIVELY[state]??.5;
-  if(t>=life.nextShift){life.shift=[rnd(-2.2,2.2)*lively,rnd(-3,3)*lively];life.nextShift=t+rnd(4,9)}
-  if(t>=life.nextTilt){life.tilt=rnd(2,5)*(Math.random()<.5?-1:1)*lively;life.tiltUntil=t+rnd(1.5,4);life.nextTilt=t+rnd(5,12)}
-  if(t>=life.tiltUntil)life.tilt=0;
-  if(t>=life.nextSmile){if(CALM.has(state)){life.smile=rnd(.12,.25);life.smileUntil=t+rnd(1.5,3)}life.nextSmile=t+rnd(8,20)}
-  if(t>=life.smileUntil)life.smile=0;
-  if(t>=life.nextFidget){
-   if(FIDGET_STATES.has(state)&&!gesture&&!queue.length&&!motionPlaying()){fidget();life.nextFidget=t+rnd(12,30)}
-   else life.nextFidget=t+rnd(3,8);
-  }
-  return {x:S.shiftX.step(life.shift[0],dt),z:S.shiftZ.step(life.shift[1],dt),tilt:S.lifeTilt.step(life.tilt,dt)};
- };
-
- const input=next=>{
-  const s=STATES[next.state]?next.state:'idle';if(s!==state)setState(s);
-  baseMood=typeof next.mood==='string'?next.mood:'neutral';
-  transient=typeof next.emotion==='string'?next.emotion:'';
-  if(next.tap)react();
-  if(next.look){lookUntil=t+2;nextSaccade=t}
-  if(typeof next.act==='string'&&next.act){if(queue.length<3)queue.push(next.act);else warnOnce('gesture queue full')}
-  speech=Math.max(0,Number(next.speech)||0);
- };
- const values={};
- const targets=new Map();
- const want=(id,value,weight)=>{
-  const tg=toggles.get(id);if(!tg)return;
-  const v=tg.d.def+(value-tg.d.def)*weight,current=targets.get(id);
-  if(current===undefined||Math.abs(v-tg.d.def)>Math.abs(current-tg.d.def))targets.set(id,v);
- };
- const animate=dt=>{
-  const cfg=STATES[state],looking=t<lookUntil,emo=currentEmotion(),pose=emo.pose,g=gestureStep(),alive=lifeStep(dt);
-  let gx=cfg.gaze[0]*(state==='thinking'?thinkSide:1)+(pose.gaze?pose.gaze[0]*.8:0),gy=cfg.gaze[1]+(pose.gaze?pose.gaze[1]*.8:0);
-  if(looking){gx=0;gy=.05}
-  if(g.gaze){gx+=(g.gaze[0]-gx)*g.gaze[2];gy+=(g.gaze[1]-gy)*g.gaze[2]}
-  if(Math.hypot(gx-lastGaze[0],gy-lastGaze[1])>.3)blinkSoon(.6,.06); // big gaze shifts often carry a blink
-  lastGaze=[gx,gy];
-  if(t>=nextSaccade)saccade(looking);
-  if(t>=glanceUntil||looking)glance=[0,0];
-  const swirl=S.swirl.step(pose.swirl||0,dt);
-  const tx=clamp(gx+glance[0]+offset[0]+swirl*.22*Math.cos(t*3),-1,1),ty=clamp(gy+glance[1]+offset[1]+swirl*.22*Math.sin(t*3),-1,1);
-  // Eyes lead; attention and then the head follow with lag, and the eyes settle back as the head turns.
-  const ax=S.attX.step(tx,dt),ay=S.attY.step(ty,dt);
-  const turnX=S.turnX.step(ax*12,dt),turnY=S.turnY.step(ay*8,dt);
-  const ph=pose.head||[0,0,0],head=looking?[0,1.5,3]:[cfg.head[0]+ph[0],cfg.head[1]+ph[1],cfg.head[2]+ph[2]];
-  const bx=S.biasX.step(head[0],dt),by=S.biasY.step(head[1],dt),bz=S.biasZ.step(head[2],dt);
-  const nod=S.nod.step(0,dt),tilt=S.tilt.step(0,dt);
-  const ex=S.eyeX.step(clamp(tx-turnX/40,-1,1),dt),ey=S.eyeY.step(clamp(ty-turnY/28,-1,1),dt);
-  const amp=S.sway.step(cfg.sway*(pose.sway||1),dt);
-  const sx=noise(t*.23,11)*3.2*amp,sy=noise(t*.19,37)*1.8*amp,sz=noise(t*.21,73)*2.4*amp,sb=noise(t*.13,97)*2.6*amp,sbz=noise(t*.11,251)*1.6*amp;
-  breathPhase+=dt*2*Math.PI/S.breathT.step(pose.breath||cfg.breath,dt)*(1+noise(t*.1,131)*.08);
-  const breath=.5+.5*Math.sin(breathPhase);
-  const talk=lipsStep(dt),energy=S.talk.step(speechEnergy(),dt);
-  const bounce=S.bounce.step(pose.bounce||0,dt)*2.2*Math.pow(Math.sin(Math.PI*1.7*t),2);
-  const sob=S.sob.step(pose.sob||0,dt)*1.3*Math.sin(2*Math.PI*2.1*t)*Math.max(0,noise(t*.6,191)+.2);
-  const doze=S.doze.step(pose.doze||0,dt)*-3.5*Math.pow(Math.max(0,Math.sin(t*.7)),2);
-  const laugh=S.laugh.step(pose.laugh||0,dt)*(.22+.2*Math.pow(Math.sin(Math.PI*4.2*t),2))*Math.max(0,noise(t*.5,233)+.4);
-  values.ParamAngleX=bx+turnX+sx+g.x+swirl*4*Math.sin(2.2*t)+energy*2.2*noise(t*.9,151);
-  values.ParamAngleY=by+turnY+sy+nod+(breath-.5)*.8+talk*1.6+g.y+bounce+sob+doze;
-  values.ParamAngleZ=bz+sz+tilt-ax*ay*6+alive.tilt+g.z+swirl*4*Math.cos(2.2*t)+energy*1.4*noise(t*.7,171);
-  values.ParamBodyAngleX=sb+turnX*.22+alive.x+g.bx;
-  values.ParamBodyAngleZ=sbz+alive.z+g.bz-alive.tilt*.2;
-  values.ParamEyeBallX=ex;values.ParamEyeBallY=ey;
-  values.ParamBreath=breath;
-  const open=Math.max(0,S.lid.step((looking?1:cfg.lid)*(pose.lid||1),dt)*(1-blinkStep(pose))*g.lid);
-  for(const id of eyeIds)values[id]=open;
-  const mouth=Math.min(1,Math.max(talk,S.mouth.step(pose.mouth||0,dt)+laugh,g.mouth));
-  for(const id of mouthIds)values[id]=mouth;
-  const smile=clamp(S.smile.step(Math.max(cfg.smile||0,pose.smile||0,t<tapSmileUntil?.25:0,life.smile),dt)+g.smile,0,1);
-  values.ParamEyeLSmile=values.ParamEyeRSmile=smile;
-  for(const p of driven)if(!toggles.has(p.id))p.out=number(values[p.id],p.def);
-  // Emotion toggles and gesture parameters ease toward their targets (about 0.25 s) and back.
-  targets.clear();
-  for(const x of emo.params)want(x.id,x.value,1);
-  if(g.emotion&&rig.emotions[g.emotion[0]])for(const x of rig.emotions[g.emotion[0]].params)want(x.id,x.value,g.emotion[1]);
-  for(const [id,value,weight] of g.params)want(id,value,weight);
-  for(const [id,tg] of toggles)tg.d.out=tg.s.step(targets.has(id)?targets.get(id):tg.d.def,dt);
- };
- let frame=0,reportedWarnings=0;
- window.asterFrame=(next={},dt=100)=>{
+ const engine=AsterCompanion.create(model.internalModel.coreModel,profile);
+ window.asterCompanion=engine;
+ let dt=100,frame=0,legacyMood='neutral',reportedWarnings=0;
+ model.internalModel.on('beforeModelUpdate',()=>engine.apply(dt));
+ window.asterFrame=(next={},delta=100)=>{
   const started=performance.now();
   if(Array.isArray(next.view))resize(next.view[0],next.view[1]);
-  input(next);
-  const step=Math.min(250,Math.max(0,Number(dt)||0))/1000;
-  t+=step;animate(step);
-  model.update(step*1000);app.renderer.render(app.stage);frame++;
+  dt=Math.max(0,Math.min(250,Number(delta)||0));
+  engine.state(next.state||'idle');
+  const results=[];
+  const call=(id,action)=>{try{results.push({id,ok:true,result:action()})}catch(error){results.push({id,ok:false,error:String(error.message||error)})}};
+  for(const item of (next.commands||[]).slice(0,32))call(item.id,()=>engine.dispatch(item.command));
+  // `mood` repeats the last emotion Aster asked for. It can arrive a frame after the command that
+  // already set it (with its own strength), so it only applies when she is not showing it yet.
+  if(next.mood&&next.mood!==legacyMood){legacyMood=next.mood;if(engine.snapshot().emotion!==next.mood)call('mood',()=>engine.emotion(next.mood,1));}
+  if(next.tap)call('tap',()=>engine.motion('nod',1));
+  if(next.look)call('look',()=>engine.look(-.25,0,2000));
+  model.update(dt);app.renderer.render(app.stage);frame++;
   const jpeg=next.format==='jpeg';
   const url=canvas.toDataURL(jpeg?'image/jpeg':'image/png',.9);
-  const result={data:url.slice(url.indexOf(',')+1),format:jpeg?'jpeg':'png',width:canvas.width,height:canvas.height,frame,state,
-   ms:Math.round((performance.now()-started)*10)/10,motion:motionPlaying(),expression:currentExpression,emotion:emotion?emotion.key:'neutral',
-   gesture:gesture?{name:gesture.name,kind:gesture.kind,source:gesture.source}:null,actions,last_action:lastAction};
+  const result={data:url.slice(url.indexOf(',')+1),format:jpeg?'jpeg':'png',width:canvas.width,height:canvas.height,frame,
+   ms:Math.round((performance.now()-started)*10)/10,control:engine.snapshot(),results};
   if(framingChanged){framingChanged=false;result.framing=framing}
   const warnings=window.asterLoading.warnings;
   if(warnings.length!==reportedWarnings){reportedWarnings=warnings.length;result.warnings=warnings.slice(-8)}
   return result;
  };
- window.asterFrame({state:'idle'});reportedWarnings=0;
- window.asterInfo={model:'弄玉',renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings.slice(),
-  width:W,height:H,raw:{width:raw.width,height:raw.height},framing,
-  parameters_driven:driven.map(p=>p.id),parameters_missing:missing,layer_hook:hook,
-  motions:rig.motions,idle_motion_group:idleGroup,tap_motion_group:tapGroup,expressions:expressionNames,rig};
- window.asterReady=true;window.asterStage='ready';
+ window.asterInfo={model:profile.name,api:engine.describe(),renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings.slice(),width:W,height:H,raw:{width:raw.width,height:raw.height},framing};
+ window.asterFrame({state:'idle'});reportedWarnings=0;window.asterReady=true;window.asterStage='ready';
 })().catch(e=>{window.asterError=String(e&&e.message||e)});
 </script>

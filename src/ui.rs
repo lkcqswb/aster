@@ -83,8 +83,12 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/restore", "Restore archived context as a new conversation"),
     ("/export", "Save a readable transcript"),
     ("/tools", "Expand or collapse tool details"),
-    ("/mood", "Her base mood · lists them all"),
-    ("/act", "Ask 弄玉 for a gesture · lists them"),
+    (
+        "/mood",
+        "Set a profile emotion, optionally with strength 0–1",
+    ),
+    ("/emotion", "List or set a companion emotion"),
+    ("/motion", "List or play a companion motion"),
     ("/look", "Ask 弄玉 to look toward you"),
     ("/pet", "Show or hide the companion"),
     ("/demo", "Run an offline file-and-check task"),
@@ -391,14 +395,6 @@ pub struct App {
     /// The conversation's provider name and context window.
     endpoint: (String, u64),
     provider_test: Option<crossbeam_channel::Receiver<String>>,
-    /// Emotion cues held back while a reply streams.
-    cues: crate::emotion::Cues,
-    cued: bool,
-    /// Her current transient feeling and when it ends, as shown in her card.
-    feeling: Option<(String, Instant)>,
-    last_activity: Instant,
-    last_idle_act: Instant,
-    sleepy: bool,
     /// The checkpoint id before a /compact the user started, to show its result.
     compacting: Option<Option<String>>,
     quit: bool,
@@ -478,12 +474,6 @@ impl App {
             meter: None,
             endpoint,
             provider_test: None,
-            cues: Default::default(),
-            cued: false,
-            feeling: None,
-            last_activity: Instant::now(),
-            last_idle_act: Instant::now(),
-            sleepy: false,
             compacting: None,
             quit: false,
             quit_started: None,
@@ -492,52 +482,6 @@ impl App {
     fn notify(&mut self, text: impl Into<String>) {
         self.notice = text.into();
         self.notice_at = Instant::now();
-    }
-    fn rig_expressions(&self) -> Vec<String> {
-        self.portrait.info["rig"]["expressions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.as_str().or(e["name"].as_str()).map(str::to_string))
-            .collect()
-    }
-    fn rig_motions(&self) -> Vec<String> {
-        self.portrait.info["rig"]["motions"]
-            .as_object()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-    /// A passing feeling on her face; her base mood returns afterwards.
-    fn emote(&mut self, name: &str, seconds: f32) {
-        self.feeling = Some((
-            name.to_string(),
-            Instant::now() + Duration::from_secs_f32(seconds.max(0.1)),
-        ));
-        if let Some(c) = &self.companion {
-            c.emote(name, seconds);
-        }
-    }
-    /// A one-off gesture, played by her rig's own motion when it has one.
-    fn act(&mut self, name: &str) {
-        if let Some(c) = &self.companion {
-            c.act(name);
-        }
-    }
-    fn express(&mut self, cue: crate::emotion::Cue) {
-        self.cued = true;
-        match cue {
-            crate::emotion::Cue::Emotion(name) => self.emote(&name, 8.0),
-            crate::emotion::Cue::Gesture(name) => self.act(&name),
-        }
-    }
-    /// Activity wakes her; a long quiet spell lets her idle, then grow sleepy.
-    fn touch(&mut self) {
-        if self.sleepy {
-            self.sleepy = false;
-            self.emote("surprised", 1.2);
-            self.act("look_around");
-        }
-        self.last_activity = Instant::now();
     }
     fn info(&mut self, title: &str, text: impl Into<String>) {
         self.inspect(Popup::Info {
@@ -716,7 +660,6 @@ impl App {
         self.session = fresh_session(&self.cfg, &self.cli);
         self.session.demo = demo;
         self.refresh_endpoint();
-        self.act("wave");
         if !title.is_empty() {
             self.session.title = title.into()
         }
@@ -739,6 +682,8 @@ impl App {
                 | "/help"
                 | "/status"
                 | "/mood"
+                | "/emotion"
+                | "/motion"
                 | "/look"
                 | "/pet"
                 | "/tools"
@@ -804,12 +749,26 @@ impl App {
    "/restore"=>{if arg.is_empty(){bail!("Use /restore followed by the ID shown in /checkpoint")};self.persist()?;self.session=self.store.restore_checkpoint(arg,&self.cfg.project)?;self.scroll=0;self.stream.clear();self.notify("Full context restored as a new conversation. Project files are shared.");},
    "/export"=>{let p=self.store.export(&self.session)?;self.notify(format!("Saved {}",p.display()));},
    "/tools"=>{self.show_tools = !self.show_tools;self.notify(if self.show_tools{"Tool details expanded"}else{"Tool details collapsed"});},
-   "/mood"=>{let rig=self.rig_expressions();if arg.is_empty(){self.info("弄玉's moods",format!("Current base mood: {}\n\nEmotions\n{}\n\nHer rig's own expressions\n{}\n\n/mood NAME sets her base mood; /mood neutral returns to calm.\nShe also shows passing feelings from her replies and from what happens: checks passing or failing, questions, long quiet spells.\n/act lists gestures. /pet rig shows the controls found on her rig.",self.mood,crate::emotion::EMOTIONS.join("  "),if rig.is_empty(){"(shown once her Live2D model has loaded)".to_string()}else{rig.join("  ")}));}else{let name=arg.to_lowercase();let known=crate::emotion::EMOTIONS.contains(&name.as_str())||rig.iter().any(|e|e==arg)||matches!(name.as_str(),"heart");if !known{bail!("Unknown mood · /mood lists them")};self.mood=if name=="heart"{"love".into()}else if rig.iter().any(|e|e==arg){arg.to_string()}else{name};let mood=self.mood.clone();self.notify(if self.companion.is_some(){format!("弄玉 · {mood}")}else{format!("Mood set to {mood} · Live2D is hidden, /pet on shows her")});}},
-   "/act"=>{if arg.is_empty(){self.info("弄玉's gestures",format!("{}\n\n/act NAME plays one. Where her rig has its own motion or arm controls for a gesture, she uses them; otherwise her head and body perform it.\nHer rig's motion groups can be played by name too: {}",crate::emotion::GESTURES.join("  "),{let groups=self.rig_motions();if groups.is_empty(){"(shown once her model has loaded)".to_string()}else{groups.join("  ")}}));}else{let name=arg.to_lowercase().replace([' ','-'],"_");if !crate::emotion::GESTURES.contains(&name.as_str())&&!self.rig_motions().iter().any(|g|g==arg){bail!("Unknown gesture · /act lists them")};let gesture=if crate::emotion::GESTURES.contains(&name.as_str()){name}else{arg.to_string()};self.act(&gesture);self.notify(if self.companion.is_some(){format!("弄玉 · {gesture}")}else{"Live2D is hidden · /pet on shows her".to_string()});}},
+   "/mood"|"/emotion"|"/motion"=>{
+       let profile=crate::companion::Profile::load(self.cfg.companion_profile.as_deref())?;
+       let motion=cmd=="/motion";
+       let names=if motion{profile.motions.keys().cloned().collect::<Vec<_>>()}else{profile.emotions.keys().cloned().collect::<Vec<_>>()};
+       if arg.is_empty(){self.info(if motion{"Companion motions"}else{"Companion emotions"},format!("{}\n\n{} NAME [strength] · strength 0–1\n/pet info · supported parameters and last result\n/pet reset · clear custom expression, motion and gaze",names.join("\n"),cmd));}
+       else {
+           let parts=arg.split_whitespace().collect::<Vec<_>>();
+           if parts.len()>2 || !names.iter().any(|n|n==parts[0]){bail!("Choose a configured name: {}",names.join(", "))};
+           let strength=parts.get(1).map(|v|v.parse::<f64>()).transpose()?.unwrap_or(1.0);
+           let command=if motion{crate::companion::Control::Motion{name:parts[0].into(),strength}}else{crate::companion::Control::Emotion{name:parts[0].into(),strength}};
+           let companion=self.companion.as_ref().context("Live2D is hidden; use /pet on")?;
+           companion.control(command)?;
+           if !motion{self.mood=parts[0].into();}
+           self.notify("Companion control queued · /pet info shows the renderer result");
+       }
+   },
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true);self.notify("弄玉 looks toward you");}else{self.notify("Live2D is hidden · /pet on shows her");}self.reaction=Some(("listening".into(),Instant::now()));},
-   "/pet"=>{match arg { "rig" => {let rig=&self.portrait.info["rig"];let text=if rig.is_null(){"Her controls are discovered when her Live2D model loads. /status shows the renderer's progress.".to_string()}else{describe_rig(rig)};self.info("弄玉's rig",text);}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
+   "/pet"=>{match arg { "info" => {self.info("Companion interface v1",serde_json::to_string_pretty(&json!({"api":self.portrait.info["api"],"control":self.portrait.info["control"],"results":self.portrait.info["control_results"]}))?);}, "reset" => {self.companion.as_ref().context("Live2D is hidden; use /pet on")?.control(crate::companion::Control::Reset)?;self.mood="neutral".into();self.notify("Companion reset queued · /pet info shows the renderer result");}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, off, retry, info or reset") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
-   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo".to_string()}else{self.endpoint.0.clone()},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&{let mut info=self.portrait.info.clone();if let Some(rig)=info.get_mut("rig"){*rig=json!(format!("{} parameters · /pet rig shows them",rig["parameters"].as_array().map_or(0,|p|p.len())));}info})?,self.cfg.limits.describe())),
+   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo".to_string()}else{self.endpoint.0.clone()},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&{let mut info=self.portrait.info.clone();if let Some(api)=info.get_mut("api"){*api=json!(format!("{} parameters · /pet info shows them",api["parameters"].as_array().map_or(0,|p|p.len())));}info})?,self.cfg.limits.describe())),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
    "/help"=>self.info("Make yourself at home",format!("{}\n\nWRITING\nEnter send · Ctrl+J, Shift+Enter or \\ Enter new line\n↑↓ move between lines, then through earlier requests\nAlt/Ctrl+←→ or Alt+B/F word · Home/End line · Ctrl+A/E line\nCtrl+W or Alt+Backspace delete word · Ctrl+U/K delete to line start/end\nEsc Esc clears the draft (↑ brings it back) · Ctrl+C clears, then quits\n\nREADING\nPgUp/PgDn page · Shift+↑↓ or wheel 3 lines · Ctrl+Home top · Ctrl+End or Esc latest\nCtrl+O shows tool details · F7 searches history\n\nWORKING\nWhile 弄玉 works: Enter steers · Alt+Enter queues · Ctrl+G redirects · Esc stops\nCtrl+P sessions (Enter open · Ctrl+N new · Ctrl+D delete)\nF1 or click 弄玉 for local task controls · F2 plan · F3 review · F4 output\nF5 checks · F6 files · F7 history · F8 tasks\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
@@ -1045,8 +1004,6 @@ impl App {
         self.state = "thinking".into();
         self.turn_started = Some(Instant::now());
         self.notice.clear();
-        self.cued = false;
-        self.act("nod");
         Ok(())
     }
     fn stop(&mut self) {
@@ -1101,7 +1058,6 @@ impl App {
                     after_bytes,
                     ..
                 } => {
-                    self.act("stretch");
                     self.notify(format!(
                         "{} · {} → {} KB · {} · /checkpoint",
                         if automatic {
@@ -1152,8 +1108,6 @@ impl App {
                 } => {
                     self.clear_decision();
                     self.state = "waiting".into();
-                    self.act("tilt");
-                    self.emote("thinking", 3.0);
                     self.popup = Some(Popup::Question {
                         question,
                         options,
@@ -1164,27 +1118,11 @@ impl App {
                 }
                 Event::Delta(text) => {
                     self.state = "speaking".into();
-                    let visible = self.cues.feed(&text);
-                    for cue in self.cues.take() {
-                        self.express(cue);
-                    }
-                    // Her mouth follows the actual rate of visible text.
-                    if let Some(c) = &self.companion {
-                        c.speak(visible.chars().count());
-                    }
-                    self.stream.push_str(&visible);
+                    self.stream.push_str(&text);
                 }
                 Event::State(state) => self.state = state,
                 Event::Entry(role, text) => {
                     self.stream.clear();
-                    if role == "nongyu" {
-                        self.cues.finish();
-                        if !std::mem::take(&mut self.cued)
-                            && let Some(feeling) = crate::emotion::infer(&text)
-                        {
-                            self.emote(feeling, 5.0);
-                        }
-                    }
                     self.session.add(&role, text);
                 }
                 Event::Usage(input, output) => {
@@ -1198,7 +1136,6 @@ impl App {
                 } => {
                     self.clear_decision();
                     self.state = "waiting".into();
-                    self.act("tilt");
                     self.popup = Some(Popup::Approval(Approval {
                         tool,
                         preview,
@@ -1233,18 +1170,9 @@ impl App {
                     if self.session.work.has_failures() {
                         self.notify("A check or command failed · F4 output · /work details");
                         self.reaction = Some(("concerned".into(), Instant::now()));
-                        self.emote("worried", 6.0);
                     } else if self.session.work.has_stale_checks() {
                         self.notify("Edits changed the project after checks · F5 to review");
                         self.reaction = Some(("concerned".into(), Instant::now()));
-                        self.emote("embarrassed", 4.0);
-                    } else if happy {
-                        self.emote("happy", 5.0);
-                        self.act("cheer");
-                    } else if self.session.status == "error" {
-                        self.emote("sad", 5.0);
-                    } else if self.session.status == "stopped" {
-                        self.emote("surprised", 1.5);
                     }
                     self.running = None;
                     self.turn_started = None;
@@ -1296,34 +1224,6 @@ impl App {
             self.persist()?;
             self.quit = true;
         }
-        // Never standing still: small idle gestures, then sleepiness after a long quiet spell.
-        let quiet = self.running.is_none() && self.popup.is_none() && self.composer.is_empty();
-        if quiet && self.last_activity.elapsed() > Duration::from_secs(300) && !self.sleepy {
-            self.sleepy = true;
-            self.emote("sleepy", 30.0);
-        } else if quiet
-            && self.last_activity.elapsed() > Duration::from_secs(45)
-            && self.last_idle_act.elapsed() > Duration::from_secs(40)
-        {
-            self.last_idle_act = Instant::now();
-            let gestures = ["look_around", "fidget", "tilt", "stretch"];
-            let pick = (self.last_activity.elapsed().as_secs() / 40) as usize % gestures.len();
-            self.act(gestures[pick]);
-        } else if self.sleepy
-            && self
-                .feeling
-                .as_ref()
-                .is_some_and(|(_, until)| Instant::now() > *until)
-        {
-            self.emote("sleepy", 30.0);
-        }
-        if self
-            .feeling
-            .as_ref()
-            .is_some_and(|(_, until)| Instant::now() > *until)
-        {
-            self.feeling = None;
-        }
         let state = if self.inspection_return.is_some() {
             "reading"
         } else if !self.session.work.waiting.is_empty() && self.running.is_some() {
@@ -1364,7 +1264,6 @@ impl App {
         Ok(())
     }
     fn key(&mut self, key: KeyEvent) -> Result<()> {
-        self.touch();
         let result = self.key_inner(key);
         if self.popup.is_none() && self.inspection_return.is_some() {
             self.popup = self.inspection_return.take().map(|p| *p);
@@ -2821,10 +2720,11 @@ impl App {
         } else {
             "here with you"
         };
-        let feeling = self
-            .feeling
-            .as_ref()
-            .map(|(name, _)| format!(" · {name}"))
+        // The emotion her renderer has confirmed, whoever asked for it.
+        let feeling = self.portrait.info["control"]["emotion"]
+            .as_str()
+            .filter(|e| *e != "neutral")
+            .map(|e| format!(" · {e}"))
             .unwrap_or_default();
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -3534,57 +3434,6 @@ impl App {
         vec![]
     }
 }
-/// A readable view of the controls the renderer found on her rig.
-fn describe_rig(rig: &Value) -> String {
-    let mut out = String::new();
-    let parameters = rig["parameters"].as_array().cloned().unwrap_or_default();
-    out += &format!("{} parameters on her rig\n\n", parameters.len());
-    for (label, key) in [("Emotions", "emotions"), ("Gestures", "gestures")] {
-        out += &format!("{label}\n");
-        for (name, how) in rig[key].as_object().into_iter().flatten() {
-            let mut parts = vec![];
-            if let Some(e) = how["expression"].as_str() {
-                parts.push(format!("expression {e}"));
-            }
-            if let Some(m) = how["motion"].as_str() {
-                parts.push(format!("motion {m}"));
-            }
-            let params = how["params"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|p| p["id"].as_str().or(p.as_str()))
-                .collect::<Vec<_>>();
-            if !params.is_empty() {
-                parts.push(params.join(", "));
-            }
-            if let Some(kind) = how["kind"].as_str() {
-                parts.push(kind.to_string());
-            }
-            out += &format!(
-                "  {name:12} {}\n",
-                if parts.is_empty() {
-                    "pose only".to_string()
-                } else {
-                    parts.join(" · ")
-                }
-            );
-        }
-        out += "\n";
-    }
-    out += "Parameters (id · display name · range)\n";
-    for p in parameters {
-        out += &format!(
-            "  {} · {} · {}–{}\n",
-            p["id"].as_str().unwrap_or("?"),
-            p["name"].as_str().unwrap_or(""),
-            p["min"],
-            p["max"]
-        );
-    }
-    out += "\nAdjust the mapping in aster-nongyu.json; see docs/NONGYU.md.";
-    out
-}
 /// A new conversation starts with the model chosen in /models, else MiniMax from .env.
 fn fresh_session(cfg: &Config, cli: &Cli) -> Session {
     let mut session = Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo);
@@ -3800,7 +3649,6 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                         }
                     }
                     TermEvent::Paste(text) => {
-                        app.touch();
                         app.paste(&text);
                     }
                     TermEvent::Resize(_, _) => {
@@ -3835,7 +3683,6 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                             }
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
-                            app.touch();
                             if let Err(e) = app.click(mouse.column, mouse.row) {
                                 app.notify(e.to_string());
                             }
@@ -3899,7 +3746,6 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
     store.save(&s)?;
     let running = agent::spawn(prior, prompt.into(), cfg, cli.permissions);
     let mut stopping = None;
-    let mut cues = crate::emotion::Cues::default();
     loop {
         if crate::lifecycle::requested() {
             running.cancel.store(true, Ordering::Relaxed);
@@ -3921,14 +3767,10 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
         };
         match event {
             Event::Delta(t) => {
-                print!("{}", clean(&cues.feed(&t)));
+                print!("{}", clean(&t));
                 io::stdout().flush()?;
             }
             Event::Entry(role, text) if role != "nongyu" => println!("\n[{role}] {}", clean(&text)),
-            Event::Entry(..) => {
-                print!("{}", clean(&cues.finish()));
-                cues.take();
-            }
             Event::Approval { answer, .. } => {
                 let _ = answer.send(false);
                 eprintln!(
@@ -4125,6 +3967,7 @@ mod layout_tests {
             model: "MiniMax-M2.7".into(),
             pet: root.join("pet"),
             chrome: root.join("chrome"),
+            companion_profile: None,
             texture_size: 2048,
             limits: Default::default(),
             auth: Default::default(),
@@ -4916,7 +4759,7 @@ mod layout_tests {
             let events = [
                 json!({"type":"message_start","message":{"usage":{"input_tokens":30}}}),
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"〔happy〕 Hello from the local provider."}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from the local provider."}}),
                 json!({"type":"content_block_stop","index":0}),
                 json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}),
                 json!({"type":"message_stop"}),
@@ -4977,7 +4820,6 @@ mod layout_tests {
         assert_eq!(header("anthropic-version"), Some("2023-06-01"));
         assert_eq!(body["model"], "test-model");
         assert_eq!(a.session.status, "done");
-        // The companion's cue is hidden from the transcript but kept for the provider.
         let reply = a
             .session
             .entries
@@ -4990,7 +4832,7 @@ mod layout_tests {
             fs::read_to_string(a.store.root.join(format!("{}.json", a.session.id))).unwrap();
         assert!(!saved.contains("SECRET"));
         let export = fs::read_to_string(a.store.export(&a.session).unwrap()).unwrap();
-        assert!(!export.contains("SECRET") && !export.contains("〔happy〕"));
+        assert!(!export.contains("SECRET"));
         // New conversations start with the chosen model.
         a.command("/new").unwrap();
         assert_eq!(a.session.provider.as_deref(), Some("local-test"));

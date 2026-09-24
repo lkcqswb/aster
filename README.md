@@ -38,12 +38,12 @@ Put that function in `~/.zshrc`, then run `source ~/.zshrc` once. No Python runt
 
 The companion pane is part of the terminal layout, not a separate window. iTerm2 receives inline JPEG frames; Ghostty and Kitty receive PNG frames through the Kitty graphics protocol, replaced in place under one image id. Aster detects these terminals and has an animated character-cell fallback that draws each cell as a two-colour quadrant block (four pixels per cell). Select a protocol explicitly with `--graphics iterm`, `--graphics kitty`, or `--graphics halfblocks`.
 
-- Start typing: she becomes attentive and leans in. Send a message: a small nod, then she thinks while waiting, works during tools and speaks during streamed text.
-- Her replies carry her feelings. The model may begin a reply or paragraph with a hidden cue such as `〔happy〕`, `〔worried〕` or `〔wave〕`. Aster removes it from the transcript (and from headless output), keeps it in the private provider history and shows it on her face or in a gesture. A reply without a cue is read conservatively for tone, so an apology looks worried and laughter looks amused.
-- What happens moves her too: a tilt at questions and approvals; happy with a cheer when checks pass; worried when a check or command fails; a stretch after compaction. When things are quiet she shifts her weight, glances around and fidgets. After five quiet minutes she grows sleepy until you come back.
-- `/mood` lists her 18 emotions (and her rig's own expressions); `/mood NAME` sets her base mood. `/act` lists her 12 gestures; `/act NAME` plays one, or any of her rig's motion groups by name.
-- `/pet rig` shows the emotion and action controls discovered on her rig and which ones each emotion and gesture uses. [Her emotions and gestures](docs/NONGYU.md) explains the discovery keywords and the optional `aster-nongyu.json` override file for fixing a match.
+- Start typing: she becomes attentive.
+- Send a message: she thinks while waiting, works during tools, and speaks during streamed text.
+- Pass a file check: a brief pleased reaction. Fail or encounter an error: a concerned state.
 - Click the portrait or use `/look` for a glance and nod.
+- `/emotion happy 0.7` (or `/mood happy`) changes her expression; `/motion nod` plays a gesture.
+- `/emotion` and `/motion` list configured names; `/pet reset` clears custom controls; `/pet info` inspects the actual interface.
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
@@ -53,7 +53,7 @@ Her work card tracks the active plan step, file or command, pending decision, an
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
 
-Her motion is procedural and eased: every state change moves her toward a new pose instead of snapping, with randomized blinks, small eye saccades, a head that follows her gaze, and slow breathing and sway. Speaking motion follows the rate of streamed reply text: syllable-like mouth pulses while text arrives, closing shortly after it stops. This version does not synthesize speech or claim audio lip sync. Emotions combine her procedural pose with the toggles, expressions and motions found on her rig (blush, tears, heart or star eyes, sweat, gestures with her arms and so on), eased in and out. Mouth-form and brow controls are never driven. The companion is a fictional AI character.
+Aster never picks an emotion or gesture for her from reply text or events. Emotions and motions come only from explicit controls: `/emotion`, `/motion`, or a caller of the companion interface (`Companion::control`), and each is confirmed or refused by the renderer. Between controls, her profile's controller keeps her alive from actual application state: slow sway and breathing, periodic blinks, and a pose for each work state (attentive while you type or a decision waits, eyes on the work while reading, mouth moving while text streams). Emotions and motions are applied on top and clamped to the rig's real parameter ranges; parameters the profile does not bind are never driven. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
 
 By default Aster reads existing assets here:
 
@@ -70,9 +70,11 @@ By default Aster reads existing assets here:
     弄玉.4096/texture_*.png
 ```
 
-Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address. Pose, user data, expression and motion JSON files referenced by the model3.json are included in that allowlist when present.
+**Custom design:** [Live2D API and autodesign guide](docs/COMPANION_API.md) includes versioned JSON profiles, a JSON Schema, TypeScript contracts, a standalone JavaScript controller and the Rust bridge. You can generate your own emotions/keyframe motions, validate them with `--check-companion`, export actual rig capabilities and preview controls locally. Model assets and vendor SDKs remain local.
 
-A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at about 15 fps, rendered at the portrait's pixel size and spaced further apart when the renderer needs more time per frame. Taller portrait panes show more of her, up to about half her body; wider panes keep a bust. `/status` reports the measured frame rate. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
+Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address. Pose, user data, expression, motion and sound files referenced by the model3.json are included in that allowlist; a missing one is skipped rather than failing startup.
+
+A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at about 15 fps, rendered at the portrait's pixel size with the profile's layout (zoom, center and anchor), and spaced further apart when the renderer needs more time per frame. `/status` reports the measured frame rate. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
 
 Startup diagnostics are saved privately in `~/.local/share/aster/diagnostics/live2d.json` (or under your selected `--state-dir`). This is a record of the latest startup or error transition, not a continuously updated frame counter. It contains no conversation or provider key. Renderer traffic stays on loopback and bypasses proxy settings. Browser stderr is retained only in its temporary profile, with a bounded excerpt included when startup fails.
 
@@ -128,7 +130,7 @@ The footer shows short hints, the context meter and the session's input/output t
 | `/follow MESSAGE` | Queue the next task after a normal finish |
 | `/queue`, `/next`, `/drop ID` | Inspect, resume or remove waiting messages |
 | `/tools` | Expand or collapse tool output |
-| `/mood`, `/look`, `/pet` | Interact with the character |
+| `/emotion`, `/mood`, `/motion`, `/look`, `/pet` | Inspect or control custom companion expressions and gestures |
 | `/demo` | Run a scripted, real file-write and verification example |
 | `/status`, `/help`, `/stop`, `/quit` | Inspect, learn, interrupt, leave |
 

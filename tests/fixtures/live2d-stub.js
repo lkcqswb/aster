@@ -1,30 +1,23 @@
 /* Test double for Aster's Live2D renderer check (src/live2d.rs, `stub_renderer_*` tests).
  *
  * This is NOT Pixi, Cubism Core or pixi-live2d-display and contains none of their code. It imitates
- * only the API surface live2d/renderer.html uses, with the same update order as pixi-live2d-display's
- * Cubism 4 internal model (motion -> save -> expression -> SDK blink/breath -> model update -> load).
- * Each frame is drawn with WebGL scissor clears: a crude face plus a strip of 4x4 blocks in the top-left
- * corner that encodes the rendered parameter values exactly (R,G = 16-bit value, B = 90), so a test can
- * read them back from lossless PNG frames.
+ * only the API surface live2d/renderer.html and live2d/companion.js use, with the same update order
+ * as pixi-live2d-display's Cubism 4 internal model (motion -> save -> expression -> SDK blink/breath
+ * -> model update -> load). Each frame is drawn with WebGL scissor clears: a crude face plus a strip
+ * of 4x4 blocks in the top-left corner that encodes the rendered parameter values exactly (R,G =
+ * 16-bit value, B = 90), so a test can read them back from lossless PNG frames.
  */
 (() => {
   'use strict';
-  // id, min, max, default. The renderer reads display names from the test's cdi3.json. Among
-  // them: ParamEyeRSmile is deliberately absent (reported missing); ParamMouthForm and the brow
-  // parameters exist and must never be driven, even ParamBrowAngry whose name says "angry";
-  // ParamHairFront matches no keyword and must stay at rest.
+  // id, min, max, default: every parameter the default profile (live2d/profiles/nongyu.json) binds,
+  // then two it does not bind, which must stay at rest.
   const PARAMS = [
     ['ParamAngleX', -30, 30, 0], ['ParamAngleY', -30, 30, 0], ['ParamAngleZ', -30, 30, 0],
-    ['ParamBodyAngleX', -10, 10, 0], ['ParamBodyAngleZ', -10, 10, 0],
-    ['ParamEyeBallX', -1, 1, 0], ['ParamEyeBallY', -1, 1, 0],
+    ['ParamBodyAngleX', -10, 10, 0], ['ParamEyeBallX', -1, 1, 0], ['ParamEyeBallY', -1, 1, 0],
     ['ParamEyeLOpen', 0, 1, 1], ['ParamEyeROpen', 0, 1, 1], ['ParamBreath', 0, 1, 0],
-    ['ParamMouthOpenY', 0, 1, 0], ['ParamEyeLSmile', 0, 1, 0],
-    ['ParamTeers2', 0, 1, 0], ['ParamTeers3', 0, 1, 0],
-    ['ParamMouthForm', -1, 1, 0], ['ParamBrowLY', -1, 1, 0], ['ParamBrowAngry', 0, 1, 0],
-    ['ParamCheek', 0, 1, 0], ['ParamTear', 0, 1, 0], ['ParamHeartEye', 0, 1, 0], ['ParamStarEye', 0, 1, 0],
-    ['ParamAngry', 0, 1, 0], ['ParamSweat', 0, 1, 0],
-    ['ParamArmRA', 0, 10, 0], ['ParamArmLWave', -10, 10, 0], ['ParamHandChin', 0, 1, 0],
-    ['ParamHairFront', -1, 1, 0],
+    ['ParamMouthOpenY', 0, 1, 0], ['ParamEyeSmile', 0, 1, 0], ['ParamEyeSmileR', 0, 1, 0],
+    ['ParamHeartEye', 0, 1, 0], ['ParamTeers3', 0, 1, 0], ['ParamTeers5', 0, 1, 0], ['ParamTeers2', 0, 1, 0],
+    ['ParamMouthForm', -1, 1, 0], ['ParamHairFront', -1, 1, 0],
   ];
   const RAW = { x: -200, y: -100, width: 800, height: 2000 }; // a tall full-body rig in model units
   const stats = { motionsStarted: 0, autoIdleRequests: 0, expressionsApplied: 0, frames: 0 };
@@ -46,7 +39,11 @@
       this.rendered = this.values.slice();
       this.unknown = new Map();
     }
-    getModel() { return { parameters: { ids: this.ids.slice(), count: this.ids.length } }; }
+    // The shape of Cubism Core's model.parameters.
+    getModel() {
+      return { parameters: { ids: this.ids.slice(), count: this.ids.length, minimumValues: this.min.slice(),
+        maximumValues: this.max.slice(), defaultValues: this.def.slice(), values: this.values.slice() } };
+    }
     getParameterCount() { return this.ids.length; }
     // Like the Cubism framework: an unknown id still receives an index, past the real parameters.
     getParameterIndex(id) {

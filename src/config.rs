@@ -36,6 +36,12 @@ pub struct Cli {
     #[arg(long)]
     /// Directory containing the local model and vendor SDK assets
     pub pet_dir: Option<PathBuf>,
+    #[arg(long, env = "ASTER_COMPANION_PROFILE")]
+    /// Declarative Live2D model, emotion and motion profile (local JSON)
+    pub companion_profile: Option<PathBuf>,
+    #[arg(long)]
+    /// Validate a companion profile without loading model assets or a provider
+    pub check_companion: Option<PathBuf>,
     #[arg(long)]
     /// Chrome or Chromium executable for the private renderer
     pub chrome: Option<PathBuf>,
@@ -51,6 +57,12 @@ pub struct Cli {
     #[arg(long)]
     /// Capture and verify changing Live2D frames in this directory
     pub live2d_probe: Option<PathBuf>,
+    #[arg(long, requires = "live2d_probe")]
+    /// Preview a configured emotion and save its acknowledged parameters
+    pub probe_emotion: Option<String>,
+    #[arg(long, requires = "live2d_probe")]
+    /// Preview a configured motion and save its acknowledged parameters
+    pub probe_motion: Option<String>,
     #[arg(long)]
     /// Save a preview of the terminal layout as SVG
     pub screenshot: Option<PathBuf>,
@@ -158,6 +170,7 @@ pub struct Config {
     pub base: String,
     pub model: String,
     pub pet: PathBuf,
+    pub companion_profile: Option<PathBuf>,
     pub chrome: PathBuf,
     pub texture_size: u32,
     pub limits: Limits,
@@ -212,6 +225,7 @@ impl Config {
                 .model
                 .clone()
                 .unwrap_or_else(|| value("MINIMAX_MODEL", "MiniMax-M2.7")),
+            companion_profile: cli.companion_profile.clone(),
             pet: cli
                 .pet_dir
                 .clone()

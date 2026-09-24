@@ -32,60 +32,7 @@ pub const VIEW_MIN: u32 = 160;
 pub const VIEW_MAX: u32 = 1400;
 /// The tuned portrait size, used until the UI reports its real pixel size.
 const DEFAULT_VIEW: (u32, u32) = (420, 620);
-/// Time constant (seconds) of the characters-per-second measure behind her speaking motion.
-const SPEECH_TAU: f64 = 0.35;
-/// Below this many characters per second she has stopped speaking.
-const SPEECH_FLOOR: f64 = 4.0;
-const SPEECH_CAP: f64 = 120.0;
-/// Speech rate for the speaking state until the UI reports streamed text through `speak`.
-const STATE_SPEECH: f64 = 28.0;
 const KITTY_IMAGE_ID: u32 = 731;
-
-/// Emotions every rig understands: a procedural pose, plus whatever toggles, expression or
-/// motion the rig provides for them. `emote` and `motion`'s mood also accept expression names.
-pub const EMOTIONS: &[&str] = &[
-    "neutral",
-    "happy",
-    "laugh",
-    "shy",
-    "love",
-    "excited",
-    "surprised",
-    "confused",
-    "thinking",
-    "sad",
-    "cry",
-    "angry",
-    "pout",
-    "embarrassed",
-    "sleepy",
-    "proud",
-    "worried",
-    "dizzy",
-];
-/// One-shot gestures: a matching motion group, else arm/hand parameters, else a head/body version.
-pub const GESTURES: &[&str] = &[
-    "wave",
-    "nod",
-    "shake",
-    "tilt",
-    "think",
-    "cheer",
-    "heart",
-    "cover",
-    "stretch",
-    "look_around",
-    "fidget",
-    "bow",
-];
-/// Longest emotion, gesture or expression name accepted from the UI or the override file.
-const NAME_LIMIT: usize = 64;
-/// Gestures waiting to be sent to the renderer; older ones are dropped beyond this.
-const ACT_QUEUE: usize = 8;
-/// A transient emotion lasts at most this long.
-const EMOTE_MAX_SECONDS: f32 = 3600.0;
-/// Size limit of the optional emotion/gesture override file.
-const EMOTION_MAP_LIMIT: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct Motion {
@@ -93,6 +40,7 @@ pub struct Motion {
     pub mood: String,
     pub tap: bool,
     pub look: bool,
+    pub commands: Vec<Value>,
 }
 
 /// How a portrait frame is encoded. Kitty's `f=100` transmission accepts PNG only.
@@ -184,220 +132,14 @@ pub struct Shared {
     pub fps: f64,
 }
 
-/// Recent characters per second of streamed reply text, decaying exponentially between deltas.
-#[derive(Clone, Copy, Debug, Default)]
-struct SpeechMeter {
-    rate: f64,
-    at: Option<Instant>,
-    heard: bool,
-}
-impl SpeechMeter {
-    fn decay(&mut self, now: Instant) {
-        if let Some(at) = self.at {
-            let dt = now.saturating_duration_since(at).as_secs_f64();
-            self.rate *= (-dt / SPEECH_TAU).exp();
-        }
-        self.at = Some(now);
-    }
-    fn add(&mut self, chars: usize, now: Instant) {
-        if chars == 0 {
-            return;
-        }
-        self.decay(now);
-        self.rate = (self.rate + chars as f64 / SPEECH_TAU).min(SPEECH_CAP);
-        self.heard = true;
-    }
-    fn level(&mut self, now: Instant) -> f64 {
-        self.decay(now);
-        if self.rate < SPEECH_FLOOR {
-            0.0
-        } else {
-            self.rate
-        }
-    }
-}
-
 /// What the UI tells the render thread besides the motion state.
-#[derive(Default)]
-struct Control {
+struct Pane {
     view: (u32, u32),
-    speech: SpeechMeter,
-    /// Transient emotion and when it ends.
-    emotion: Option<(String, Instant)>,
-    /// One-shot gestures or motion group names, sent one per frame.
-    acts: std::collections::VecDeque<String>,
 }
-impl Control {
+impl Pane {
     fn new() -> Self {
-        Self {
-            view: DEFAULT_VIEW,
-            ..Self::default()
-        }
+        Self { view: DEFAULT_VIEW }
     }
-    fn speech_for(&mut self, state: &str, now: Instant) -> (f64, &'static str) {
-        let level = self.speech.level(now);
-        if !self.speech.heard && state == "speaking" {
-            (STATE_SPEECH, "state")
-        } else {
-            (level, "text")
-        }
-    }
-    fn emote(&mut self, name: &str, seconds: f32, now: Instant) {
-        self.emotion = match clean_name(name) {
-            Some(name) if seconds.is_finite() && seconds > 0.0 => Some((
-                name,
-                now + Duration::from_secs_f32(seconds.min(EMOTE_MAX_SECONDS)),
-            )),
-            _ => None,
-        };
-    }
-    /// The transient emotion still in effect at `now`, or "" once it has expired.
-    fn transient(&mut self, now: Instant) -> String {
-        if self
-            .emotion
-            .as_ref()
-            .is_some_and(|(_, until)| *until <= now)
-        {
-            self.emotion = None;
-        }
-        self.emotion
-            .as_ref()
-            .map(|(name, _)| name.clone())
-            .unwrap_or_default()
-    }
-    fn act(&mut self, name: &str) {
-        if let Some(name) = clean_name(name) {
-            self.acts.push_back(name);
-            while self.acts.len() > ACT_QUEUE {
-                self.acts.pop_front();
-            }
-        }
-    }
-}
-/// A trimmed name of 1..=NAME_LIMIT characters without control characters.
-fn clean_name(name: &str) -> Option<String> {
-    let name = name.trim();
-    (!name.is_empty() && name.chars().count() <= NAME_LIMIT && !name.chars().any(char::is_control))
-        .then(|| name.to_string())
-}
-
-/// Validate the user's emotion/gesture override document into the shape the renderer reads:
-/// `{"emotions":{name:{params:{id:number|null},expression,motion}},
-///   "gestures":{name:{params:{id:number|[numbers]|null},motion}}}`.
-/// Anything else is dropped with a warning.
-fn sanitize_emotion_map(raw: &Value) -> (Value, Vec<String>) {
-    let mut warnings = Vec::new();
-    let Some(top) = raw.as_object() else {
-        return (Value::Null, vec!["expected a JSON object".into()]);
-    };
-    let mut out = json!({"emotions": {}, "gestures": {}});
-    for (section, entries) in top {
-        if section != "emotions" && section != "gestures" {
-            warnings.push(format!("unknown key `{section}` ignored"));
-            continue;
-        }
-        let gestures = section == "gestures";
-        let Some(entries) = entries.as_object() else {
-            warnings.push(format!("`{section}` must be an object"));
-            continue;
-        };
-        for (name, entry) in entries.iter().take(64) {
-            let Some(key) = clean_name(name).map(|n| n.to_lowercase()) else {
-                warnings.push(format!("`{section}` has an invalid name"));
-                continue;
-            };
-            let Some(fields) = entry.as_object() else {
-                warnings.push(format!("`{section}.{key}` must be an object"));
-                continue;
-            };
-            let mut clean = serde_json::Map::new();
-            for (field, value) in fields {
-                let at = format!("{section}.{key}.{field}");
-                match field.as_str() {
-                    "params" => {
-                        let Some(params) = value.as_object() else {
-                            warnings.push(format!("`{at}` must be an object"));
-                            continue;
-                        };
-                        let mut kept = serde_json::Map::new();
-                        for (id, v) in params.iter().take(32) {
-                            let number = |v: &Value| v.as_f64().filter(|n| n.is_finite());
-                            let ok = match v {
-                                Value::Null => true,
-                                Value::Number(_) => number(v).is_some(),
-                                Value::Array(list) if gestures => {
-                                    (1..=8).contains(&list.len())
-                                        && list.iter().all(|n| number(n).is_some())
-                                }
-                                _ => false,
-                            };
-                            match clean_name(id) {
-                                Some(id) if ok => {
-                                    kept.insert(id, v.clone());
-                                }
-                                _ => warnings.push(format!(
-                                    "`{at}.{}` needs {}",
-                                    id.chars().take(NAME_LIMIT).collect::<String>(),
-                                    if gestures {
-                                        "a number, a list of up to 8 numbers, or null"
-                                    } else {
-                                        "a number or null"
-                                    }
-                                )),
-                            }
-                        }
-                        clean.insert("params".into(), Value::Object(kept));
-                    }
-                    "motion" | "expression" if field == "motion" || !gestures => match value {
-                        Value::Null => {
-                            clean.insert(field.clone(), Value::Null);
-                        }
-                        Value::String(s) if clean_name(s).is_some() => {
-                            clean.insert(field.clone(), json!(s.trim()));
-                        }
-                        _ => warnings.push(format!("`{at}` needs a name or null")),
-                    },
-                    _ => warnings.push(format!("unknown key `{at}` ignored")),
-                }
-            }
-            out[section][key] = Value::Object(clean);
-        }
-    }
-    (out, warnings)
-}
-/// Where the override file may live: beside the model assets, then in the user's config.
-fn emotion_map_paths(pet: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![pet.join("aster-nongyu.json")];
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join(".config/aster/nongyu.json"));
-    }
-    paths
-}
-/// Load the first override file found: (validated map or null, diagnostic record or null).
-fn load_emotion_map(paths: &[PathBuf]) -> (Value, Value) {
-    let Some(path) = paths.iter().find(|p| p.exists()) else {
-        return (Value::Null, Value::Null);
-    };
-    let source = path.display().to_string();
-    let failed = |error: String| (Value::Null, json!({"source": source, "error": error}));
-    let file = match fs::File::open(path) {
-        Ok(file) if file.metadata().is_ok_and(|m| m.is_file()) => file,
-        Ok(_) => return failed("not a regular file".into()),
-        Err(e) => return failed(format!("unreadable: {e}")),
-    };
-    let mut bytes = Vec::new();
-    if let Err(e) = file.take(EMOTION_MAP_LIMIT + 1).read_to_end(&mut bytes) {
-        return failed(format!("unreadable: {e}"));
-    }
-    if bytes.len() as u64 > EMOTION_MAP_LIMIT {
-        return failed("larger than 64 KB".into());
-    }
-    let raw: Value = match serde_json::from_slice(&bytes) {
-        Ok(raw) => raw,
-        Err(e) => return failed(format!("invalid JSON: {e}")),
-    };
-    let (map, warnings) = sanitize_emotion_map(&raw);
-    (map, json!({"source": source, "warnings": warnings}))
 }
 
 /// Scale a pixel size into `VIEW_MIN..=VIEW_MAX` per side, keeping its aspect ratio where possible.
@@ -451,7 +193,7 @@ fn round1(v: f64) -> f64 {
 
 pub struct Companion {
     pub shared: Arc<Mutex<Shared>>,
-    control: Arc<Mutex<Control>>,
+    pane: Arc<Mutex<Pane>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -470,16 +212,16 @@ impl Companion {
             },
             ..Default::default()
         }));
-        let control = Arc::new(Mutex::new(Control::new()));
+        let pane = Arc::new(Mutex::new(Pane::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let sh = shared.clone();
-        let ctl = control.clone();
+        let pn = pane.clone();
         let st = stop.clone();
         let handle = thread::spawn(move || {
             for attempt in 1..=2 {
                 sh.lock().unwrap_or_else(|e| e.into_inner()).info["attempt"] = json!(attempt);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render_loop(&cfg, &sh, &ctl, &st, format)
+                    render_loop(&cfg, &sh, &pn, &st, format)
                 }));
                 let error = match result {
                     Ok(Ok(())) => None,
@@ -518,7 +260,7 @@ impl Companion {
         });
         Self {
             shared,
-            control,
+            pane,
             stop,
             handle: Some(handle),
         }
@@ -535,34 +277,19 @@ impl Companion {
     /// `VIEW_MIN..=VIEW_MAX` per side, keeping the aspect ratio where possible.
     pub fn set_view(&self, width_px: u32, height_px: u32) {
         if let Some(view) = clamp_view(width_px, height_px) {
-            self.control.lock().unwrap_or_else(|e| e.into_inner()).view = view;
+            self.pane.lock().unwrap_or_else(|e| e.into_inner()).view = view;
         }
     }
-    /// Report one streamed delta of reply text by its character count. Her mouth follows the
-    /// recent characters-per-second and closes smoothly shortly after the text stops.
-    pub fn speak(&self, chars: usize) {
-        self.control
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .speech
-            .add(chars, Instant::now());
-    }
-    /// Show a transient emotion for `seconds` over her mood; `seconds <= 0` clears it. Names may be
-    /// any of [`EMOTIONS`], a model expression name, or an emotion from the override file; the
-    /// renderer reports names it cannot match in `info["warnings"]`.
-    pub fn emote(&self, name: &str, seconds: f32) {
-        self.control
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .emote(name, seconds, Instant::now());
-    }
-    /// Queue a one-shot gesture from [`GESTURES`] or a model motion group name. Gestures play one
-    /// after another; at most eight wait.
-    pub fn act(&self, name: &str) {
-        self.control
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .act(name);
+    /// Queue a cosmetic control. A renderer acknowledgement reports actual acceptance.
+    pub fn control(&self, command: crate::companion::Control) -> Result<String> {
+        command.validate()?;
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.motion.commands.len() >= 32 {
+            bail!("Companion control queue is full; wait for the renderer")
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        s.motion.commands.push(json!({"id":id,"command":command}));
+        Ok(id)
     }
     pub fn current(&self) -> Shared {
         self.shared
@@ -627,8 +354,6 @@ struct AssetServer {
     url: String,
     /// Optional model references (motions, expressions, pose, user data) whose files are missing.
     unserved: Vec<String>,
-    /// Where the emotion/gesture overrides came from and what was dropped, or null.
-    emotion_map: Value,
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -640,29 +365,34 @@ impl Drop for AssetServer {
         }
     }
 }
-/// JSON files the Live2D runtime loads on demand: pose, user data, expressions and motions.
-fn optional_references(definition: &Value) -> Vec<String> {
+/// Files the Live2D runtime loads on demand: pose, user data, expressions, motions and their sounds.
+fn optional_references(definition: &Value) -> Result<Vec<String>> {
     let refs = &definition["FileReferences"];
     let mut found: Vec<&str> = ["Pose", "UserData"]
         .iter()
         .filter_map(|key| refs[*key].as_str())
         .collect();
-    if let Some(list) = refs["Expressions"].as_array() {
-        found.extend(list.iter().filter_map(|e| e["File"].as_str()));
+    for expression in refs["Expressions"].as_array().into_iter().flatten() {
+        found.push(
+            expression["File"]
+                .as_str()
+                .context("Invalid expression file")?,
+        );
     }
-    if let Some(groups) = refs["Motions"].as_object() {
-        for motions in groups.values().filter_map(Value::as_array) {
-            found.extend(motions.iter().filter_map(|m| m["File"].as_str()));
+    for group in refs["Motions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|v| v.values())
+    {
+        for motion in group.as_array().context("Invalid motion group")? {
+            found.push(motion["File"].as_str().context("Invalid motion file")?);
+            found.extend(motion["Sound"].as_str());
         }
     }
-    let mut out: Vec<String> = found
-        .into_iter()
-        .filter(|p| p.to_ascii_lowercase().ends_with(".json"))
-        .map(String::from)
-        .collect();
+    let mut out: Vec<String> = found.into_iter().map(String::from).collect();
     out.sort();
     out.dedup();
-    out
+    Ok(out)
 }
 fn content_type(name: &str) -> &'static str {
     let name = name.to_ascii_lowercase();
@@ -677,25 +407,51 @@ fn content_type(name: &str) -> &'static str {
     }
 }
 fn assets(cfg: &Config) -> Result<AssetServer> {
-    let model = cfg.pet.join("弄玉运行档_无水印");
-    let model_file = model.join("弄玉.model3.json");
-    let definition: Value = serde_json::from_slice(
-        &fs::read(&model_file)
-            .context("Cannot find 弄玉.model3.json; set --pet-dir to desktop-pet/assets")?,
-    )?;
+    let profile = crate::companion::Profile::load(cfg.companion_profile.as_deref())?;
+    let model_file = cfg.pet.join(&profile.model);
+    let model = model_file
+        .parent()
+        .context("Model has no parent directory")?;
+    let root = cfg.pet.canonicalize()?;
+    if !model_file
+        .canonicalize()
+        .context("Cannot find model; check --pet-dir and --companion-profile")?
+        .starts_with(&root)
+    {
+        bail!("Live2D model escapes the asset directory");
+    }
+    let mut text = Vec::new();
+    fs::File::open(&model_file)?
+        .take(1_000_001)
+        .read_to_end(&mut text)?;
+    if text.len() > 1_000_000 {
+        bail!("Model definition exceeds 1 MB")
+    }
+    let definition: Value = serde_json::from_slice(&text)?;
     let mut paths = HashMap::<String, PathBuf>::new();
-    paths.insert("model/弄玉.model3.json".into(), model_file);
+    let filename = model_file
+        .file_name()
+        .context("Model has no file name")?
+        .to_str()
+        .context("Model name is not UTF-8")?;
+    paths.insert(format!("model/{filename}"), model_file.clone());
+    let mut reference = |p: &str| -> Result<()> {
+        if !crate::companion::relative(p) {
+            bail!("Live2D references must be relative local paths")
+        }
+        paths.insert(format!("model/{p}"), model.join(p));
+        Ok(())
+    };
     for key in ["Moc", "Physics", "DisplayInfo"] {
         if let Some(p) = definition["FileReferences"][key].as_str() {
-            paths.insert(format!("model/{p}"), model.join(p));
+            reference(p)?;
         }
     }
     for p in definition["FileReferences"]["Textures"]
         .as_array()
         .context("No Live2D textures")?
     {
-        let p = p.as_str().context("Invalid texture name")?;
-        paths.insert(format!("model/{p}"), model.join(p));
+        reference(p.as_str().context("Invalid texture name")?)?;
     }
     for name in [
         "pixi.min.js",
@@ -704,15 +460,17 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
     ] {
         paths.insert(format!("vendor/{name}"), cfg.pet.join("vendor").join(name));
     }
-    let root = cfg.pet.canonicalize()?;
     for path in paths.values() {
         if !path.canonicalize()?.starts_with(&root) {
             bail!("Live2D reference escapes the asset directory")
         }
     }
-    // Optional files follow the same rule; a missing one is left unserved rather than failing startup.
+    // Optional files follow the same rules; a missing one is left unserved rather than failing startup.
     let mut unserved = Vec::new();
-    for reference in optional_references(&definition) {
+    for reference in optional_references(&definition)? {
+        if !crate::companion::relative(&reference) {
+            bail!("Live2D references must be relative local paths")
+        }
         let path = model.join(&reference);
         match path.canonicalize() {
             Ok(real) if real.starts_with(&root) => {
@@ -733,8 +491,7 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
     let expected_host = address.to_string();
-    let (map, emotion_map) = load_emotion_map(&emotion_map_paths(&cfg.pet));
-    let settings = json!({"texture_size":cfg.texture_size,"emotion_map":map})
+    let settings = json!({"texture_size":cfg.texture_size,"profile":profile})
         .to_string()
         .into_bytes();
     let join = thread::spawn(move || {
@@ -762,6 +519,11 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
                         include_bytes!("../live2d/renderer.html").to_vec(),
                         "text/html",
                     ))
+                } else if name == "companion.js" {
+                    Some((
+                        include_bytes!("../live2d/companion.js").to_vec(),
+                        "application/javascript",
+                    ))
                 } else if name == "settings.json" {
                     Some((settings.clone(), "application/json"))
                 } else {
@@ -786,7 +548,6 @@ fn assets(cfg: &Config) -> Result<AssetServer> {
     Ok(AssetServer {
         url,
         unserved,
-        emotion_map,
         stop,
         join: Some(join),
     })
@@ -850,7 +611,7 @@ impl Cdp {
 fn render_loop(
     cfg: &Config,
     shared: &Arc<Mutex<Shared>>,
-    control: &Arc<Mutex<Control>>,
+    pane: &Arc<Mutex<Pane>>,
     stop: &Arc<AtomicBool>,
     format: FrameFormat,
 ) -> Result<()> {
@@ -863,9 +624,6 @@ fn render_loop(
         let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         if !server.unserved.is_empty() {
             s.info["unserved_references"] = json!(server.unserved);
-        }
-        if !server.emotion_map.is_null() {
-            s.info["emotion_map"] = server.emotion_map.clone();
         }
     }
     let profile = tempfile::Builder::new().prefix("aster-live2d-").tempdir()?;
@@ -1009,24 +767,18 @@ fn render_loop(
             let m = s.motion.clone();
             s.motion.tap = false;
             s.motion.look = false;
+            s.motion.commands.clear();
             m
         };
-        let (view, speech, speech_source, emotion, act) = {
-            let mut c = control.lock().unwrap_or_else(|e| e.into_inner());
-            let (speech, source) = c.speech_for(&motion.state, frame_start);
-            let emotion = c.transient(frame_start);
-            (c.view, speech, source, emotion, c.acts.pop_front())
-        };
+        let view = pane.lock().unwrap_or_else(|e| e.into_inner()).view;
         let input = json!({
             "state": motion.state,
             "mood": motion.mood,
             "tap": motion.tap,
             "look": motion.look,
-            "speech": round1(speech),
+            "commands": motion.commands,
             "view": [view.0, view.1],
             "format": format.page_name(),
-            "emotion": emotion,
-            "act": act,
         });
         let value = cdp.evaluate(&format!("window.asterFrame({input},{dt})"))?;
         let data = STANDARD.decode(
@@ -1051,8 +803,9 @@ fn render_loop(
             let bytes = data.len();
             s.frame = Some(PortraitFrame::new(data, format, s.frames, width, height));
             s.fps = pacing.fps();
-            for key in ["emotion", "gesture", "actions", "last_action"] {
-                s.info[key] = value[key].clone();
+            s.info["control"] = value["control"].clone();
+            if value["results"].as_array().is_some_and(|v| !v.is_empty()) {
+                s.info["control_results"] = value["results"].clone();
             }
             for key in ["framing", "warnings"] {
                 if let Some(v) = value.get(key) {
@@ -1067,9 +820,6 @@ fn render_loop(
                 s.info["fps"] = json!(round1(pacing.fps()));
                 s.info["frame_ms"] = json!(round1(pacing.cost_ms()));
                 s.info["page_ms"] = value["ms"].clone();
-                s.info["speech_source"] = json!(speech_source);
-                s.info["motion_playing"] = value["motion"].clone();
-                s.info["expression"] = value["expression"].clone();
             }
             s.frames
         };
@@ -1289,7 +1039,7 @@ pub fn halfblocks(frame: &PortraitFrame, area: Rect, buf: &mut Buffer) {
         }
     }
 }
-pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
+pub fn probe(cfg: &Config, dir: &Path, emotion: Option<&str>, motion: Option<&str>) -> Result<()> {
     fs::create_dir_all(dir)?;
     let c = Companion::start_with(cfg.clone(), FrameFormat::Png);
     let started = Instant::now();
@@ -1304,8 +1054,6 @@ pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
         }
         if let Some(frame) = s.frame {
             if let Some((initial, sequence)) = &first {
-                // Streamed text keeps her speech energy up, so the mouth moves as in a real reply.
-                c.speak(9);
                 if frame.sequence < *sequence + 30 {
                     thread::sleep(Duration::from_millis(100));
                     continue;
@@ -1320,6 +1068,78 @@ pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
                         &json!({"info":s.info,"frames":s.frames,"fps":round1(s.fps),"animation_changes":true}),
                     )?,
                 )?;
+                fs::write(
+                    dir.join("interface.json"),
+                    serde_json::to_vec_pretty(&s.info["api"])?,
+                )?;
+                if emotion.is_some() || motion.is_some() {
+                    use crate::companion::Control;
+                    c.motion("idle", "neutral", false, false);
+                    let mut results = vec![];
+                    let mut capture = |label: &str, command: Control| -> Result<()> {
+                        let id = c.control(command)?;
+                        let until = Instant::now() + Duration::from_secs(10);
+                        loop {
+                            if crate::lifecycle::requested() {
+                                bail!("Preview interrupted")
+                            }
+                            let observed = c.current();
+                            if observed.status.starts_with("Live2D unavailable") {
+                                bail!(observed.status)
+                            }
+                            if let Some(result) = observed.info["control_results"]
+                                .as_array()
+                                .and_then(|rs| rs.iter().find(|r| r["id"] == id))
+                            {
+                                if result["ok"] != true {
+                                    bail!("Control rejected: {}", result["error"])
+                                }
+                                fs::write(
+                                    dir.join(format!("{label}.png")),
+                                    &observed.frame.context("No preview frame")?.data,
+                                )?;
+                                results.push(json!({"label":label,"acknowledgement":result,"control":observed.info["control"]}));
+                                return Ok(());
+                            }
+                            if Instant::now() >= until {
+                                bail!("Companion control was not acknowledged")
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    };
+                    capture("neutral", Control::Reset)?;
+                    if let Some(name) = emotion {
+                        capture(
+                            "emotion",
+                            Control::Emotion {
+                                name: name.into(),
+                                strength: 0.7,
+                            },
+                        )?;
+                    }
+                    if let Some(name) = motion {
+                        capture(
+                            "motion",
+                            Control::Motion {
+                                name: name.into(),
+                                strength: 0.8,
+                            },
+                        )?;
+                    }
+                    capture(
+                        "look",
+                        Control::Look {
+                            x: 0.4,
+                            y: 0.2,
+                            duration_ms: 1000,
+                        },
+                    )?;
+                    capture("reset", Control::Reset)?;
+                    fs::write(
+                        dir.join("controls.json"),
+                        serde_json::to_vec_pretty(&results)?,
+                    )?;
+                }
                 println!(
                     "Live2D model loaded; {} frames at {:.1} fps captured in {}",
                     s.frames,
@@ -1331,7 +1151,6 @@ pub fn probe(cfg: &Config, dir: &Path) -> Result<()> {
                 fs::write(dir.join("idle.png"), &frame.data)?;
                 first = Some((frame.data, frame.sequence));
                 c.motion("speaking", "happy", true, false);
-                c.speak(9);
             }
         }
         if started.elapsed() > Duration::from_secs(75) {
@@ -1355,6 +1174,7 @@ mod tests {
             model: String::new(),
             pet,
             chrome,
+            companion_profile: None,
             texture_size: 1024,
             limits: Default::default(),
             auth: Default::default(),
@@ -1414,8 +1234,16 @@ mod tests {
             .json()
             .unwrap();
         assert_eq!(settings["texture_size"], 1024);
-        // Overrides come from the pet directory or ~/.config; this fixture has none of its own.
-        assert!(settings.get("emotion_map").is_some());
+        assert_eq!(settings["profile"]["version"], 1);
+        assert!(
+            client
+                .get(format!("{}companion.js", server.url))
+                .send()
+                .unwrap()
+                .text()
+                .unwrap()
+                .contains("AsterCompanion")
+        );
         assert_eq!(
             client
                 .get(format!("{}.env", server.url))
@@ -1483,8 +1311,14 @@ mod tests {
             let body: Value = response.json().unwrap();
             assert_eq!(body["fixture"], name);
         }
+        // A motion's sound is served with it; files the model does not reference are not.
+        let sound = client
+            .get(format!("{}model/sounds/idle.wav", server.url))
+            .send()
+            .unwrap();
+        assert_eq!(sound.status(), 200);
+        assert_eq!(sound.text().unwrap(), "RIFF");
         for name in [
-            "model/sounds/idle.wav",
             "model/motions/unlisted.motion3.json",
             "model/expressions/gone.exp3.json",
             "model/弄玉运行档_无水印/弄玉.model3.json",
@@ -1498,7 +1332,7 @@ mod tests {
         }
         drop(server);
 
-        // A reference that resolves outside the asset directory refuses to start the server.
+        // A reference that climbs out of the model folder refuses to start the server.
         let outside = tempfile::tempdir().unwrap();
         let pet = pet_fixture(
             outside.path(),
@@ -1507,7 +1341,7 @@ mod tests {
         write(&outside.path().join("secret.exp3.json"), "{}");
         let cfg = config(outside.path(), pet, outside.path().join("chrome"));
         let error = assets(&cfg).err().expect("escaping reference must fail");
-        assert!(error.to_string().contains("escapes"));
+        assert!(error.to_string().contains("relative local paths"));
         #[cfg(unix)]
         {
             let linked = tempfile::tempdir().unwrap();
@@ -1617,6 +1451,57 @@ mod tests {
         );
     }
     #[test]
+    fn custom_model_profiles_allow_local_motion_and_expression_references_only() {
+        let root = tempfile::tempdir().unwrap();
+        let pet = root.path().join("assets");
+        let model = pet.join("custom");
+        fs::create_dir_all(&model).unwrap();
+        fs::create_dir(pet.join("vendor")).unwrap();
+        let metadata = model.join("avatar.model3.json");
+        fs::write(&metadata, r#"{"FileReferences":{"Moc":"rig.moc3","Textures":["texture.png"],"Expressions":[{"Name":"smile","File":"smile.exp3.json"}],"Motions":{"Idle":[{"File":"idle.motion3.json"}]}}}"#).unwrap();
+        for filename in [
+            "rig.moc3",
+            "texture.png",
+            "smile.exp3.json",
+            "idle.motion3.json",
+        ] {
+            fs::write(model.join(filename), "fixture").unwrap();
+        }
+        for filename in [
+            "pixi.min.js",
+            "live2dcubismcore.min.js",
+            "pixi-live2d-display-cubism4.min.js",
+        ] {
+            fs::write(pet.join("vendor").join(filename), "fixture").unwrap();
+        }
+        let mut profile = crate::companion::Profile::load(None).unwrap();
+        profile.model = "custom/avatar.model3.json".into();
+        let path = root.path().join("profile.json");
+        fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+        let mut cfg = config(root.path(), pet, root.path().join("chrome"));
+        cfg.companion_profile = Some(path);
+        let server = assets(&cfg).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for filename in ["smile.exp3.json", "idle.motion3.json"] {
+            assert_eq!(
+                client
+                    .get(format!("{}model/{filename}", server.url))
+                    .send()
+                    .unwrap()
+                    .text()
+                    .unwrap(),
+                "fixture"
+            );
+        }
+        drop(server);
+        fs::write(&metadata, r#"{"FileReferences":{"Moc":"rig.moc3","Textures":["texture.png"],"Motions":{"Idle":[{"File":"../secret.motion3.json"}]}}}"#).unwrap();
+        assert!(assets(&cfg).is_err());
+    }
+    #[test]
     fn graphics_packets_match_frame_formats() {
         let a = Rect::new(2, 3, 20, 30);
         let png = PortraitFrame::new(vec![0; 9000], FrameFormat::Png, 1, 10, 10);
@@ -1662,7 +1547,7 @@ mod tests {
             root.path().join("missing-chrome"),
         );
         let companion = Companion::start(cfg, Graphics::Iterm);
-        let view = || companion.control.lock().unwrap().view;
+        let view = || companion.pane.lock().unwrap().view;
         assert_eq!(view(), DEFAULT_VIEW);
         companion.set_view(3000, 3000);
         assert_eq!(view(), (1400, 1400));
@@ -1671,38 +1556,6 @@ mod tests {
         companion.set_view(300, 200);
         companion.set_view(300, 200);
         assert_eq!(view(), (300, 200));
-    }
-    #[test]
-    fn speech_energy_rises_with_text_and_decays_after_it_stops() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut meter = SpeechMeter::default();
-        assert_eq!(meter.level(t0), 0.0);
-        meter.add(7, t0);
-        assert!((meter.level(t0) - 20.0).abs() < 1e-9);
-        let decayed = meter.level(at(350));
-        assert!((decayed - 20.0 * (-1f64).exp()).abs() < 1e-6, "{decayed}");
-        assert_eq!(meter.level(at(2000)), 0.0);
-        // A steady stream of 40 characters per second reads as about 40.
-        let mut steady = SpeechMeter::default();
-        for i in 0..60 {
-            steady.add(2, at(50 * i));
-        }
-        let rate = steady.level(at(50 * 59));
-        assert!((35.0..50.0).contains(&rate), "{rate}");
-        // Silence returns her mouth to rest.
-        assert_eq!(steady.level(at(50 * 59 + 1500)), 0.0);
-        let mut burst = SpeechMeter::default();
-        burst.add(10_000, t0);
-        assert_eq!(burst.level(t0), SPEECH_CAP);
-        // Until any text is reported, the speaking state stands in for speech.
-        let mut control = Control::new();
-        assert_eq!(control.speech_for("speaking", t0), (STATE_SPEECH, "state"));
-        assert_eq!(control.speech_for("idle", t0), (0.0, "text"));
-        control.speech.add(0, t0);
-        assert_eq!(control.speech_for("speaking", t0).1, "state");
-        control.speech.add(5, t0);
-        assert_eq!(control.speech_for("speaking", at(3000)), (0.0, "text"));
     }
     #[test]
     fn pacing_targets_fifteen_fps_and_backs_off_when_slow() {
@@ -1767,196 +1620,41 @@ mod tests {
         assert!(!log.contains(&cfg.key));
     }
 
-    #[test]
-    fn emotion_and_gesture_requests_expire_and_queue() {
-        assert_eq!(EMOTIONS.len(), 18);
-        assert_eq!(GESTURES.len(), 12);
-        // The renderer knows exactly the same canonical names.
-        let page = include_str!("../live2d/renderer.html");
-        let list = |name: &str| -> Vec<String> {
-            let start = page.find(&format!("const {name}=[")).unwrap() + name.len() + 8;
-            let end = start + page[start..].find(']').unwrap();
-            page[start..end]
-                .split(',')
-                .map(|s| s.trim_matches('\'').to_string())
-                .collect()
-        };
-        assert_eq!(list("EMOTIONS"), EMOTIONS);
-        assert_eq!(list("GESTURES"), GESTURES);
-
-        let t0 = Instant::now();
-        let mut control = Control::new();
-        assert_eq!(control.transient(t0), "");
-        control.emote(" shy ", 1.5, t0);
-        assert_eq!(control.transient(t0 + Duration::from_millis(1400)), "shy");
-        assert_eq!(control.transient(t0 + Duration::from_millis(1600)), "");
-        assert!(control.emotion.is_none(), "expired in Rust");
-        control.emote("F03", 10.0, t0);
-        control.emote("F03", 0.0, t0);
-        assert_eq!(control.transient(t0), "", "zero seconds clears");
-        control.emote("angry", f32::NAN, t0);
-        assert_eq!(control.transient(t0), "");
-        control.emote(&"x".repeat(NAME_LIMIT + 1), 5.0, t0);
-        assert_eq!(control.transient(t0), "", "overlong names are refused");
-        control.emote("sad", 1e9, t0);
-        assert!(control.emotion.as_ref().unwrap().1 <= t0 + Duration::from_secs(3600));
-        for name in ["wave", "", "  ", "nod\u{7}", "bow"] {
-            control.act(name);
-        }
-        assert_eq!(control.acts, ["wave", "bow"]);
-        for i in 0..20 {
-            control.act(&format!("g{i}"));
-        }
-        assert_eq!(control.acts.len(), ACT_QUEUE);
-        assert_eq!(control.acts.front().unwrap(), "g12", "oldest dropped first");
-
-        // The public API reaches the same queue on a companion whose renderer failed to start.
-        let root = tempfile::tempdir().unwrap();
-        let cfg = config(
-            root.path(),
-            root.path().join("pet"),
-            root.path().join("missing-chrome"),
-        );
-        let companion = Companion::start(cfg, Graphics::Iterm);
-        companion.emote("love", 2.0);
-        companion.act("cheer");
-        let mut c = companion.control.lock().unwrap();
-        assert_eq!(c.transient(Instant::now()), "love");
-        assert_eq!(c.acts.pop_front().as_deref(), Some("cheer"));
-    }
-    #[test]
-    fn emotion_map_overrides_are_validated() {
-        let raw = json!({
-            "emotions": {
-                "Shy": {"params": {"ParamCheek": 1, "ParamOld": null, "ParamBad": "x", "ParamList": [1, 2]},
-                        "expression": "害羞", "motion": null, "colour": "pink"},
-                "smug": {"params": {"ParamStarEye": 0.5}}
-            },
-            "gestures": {
-                "wave": {"motion": "Wave", "params": {"ParamArmR": [0, 10], "ParamTooMany": [1, 2, 3, 4, 5, 6, 7, 8, 9]},
-                         "expression": "Happy"},
-                "heart": "not an object"
-            },
-            "bogus": true
-        });
-        let (map, warnings) = sanitize_emotion_map(&raw);
-        assert_eq!(
-            map,
-            json!({
-                "emotions": {
-                    "shy": {"params": {"ParamCheek": 1, "ParamOld": null}, "expression": "害羞", "motion": null},
-                    "smug": {"params": {"ParamStarEye": 0.5}}
-                },
-                "gestures": {"wave": {"motion": "Wave", "params": {"ParamArmR": [0, 10]}}}
-            })
-        );
-        let joined = warnings.join("\n");
-        for expected in [
-            "unknown key `bogus`",
-            "`emotions.shy.params.ParamBad` needs a number or null",
-            "`emotions.shy.params.ParamList` needs a number or null",
-            "unknown key `emotions.shy.colour`",
-            "`gestures.wave.params.ParamTooMany` needs a number, a list",
-            "unknown key `gestures.wave.expression`",
-            "`gestures.heart` must be an object",
-        ] {
-            assert!(joined.contains(expected), "{expected} in {joined}");
-        }
-        assert_eq!(sanitize_emotion_map(&json!([1])).0, Value::Null);
-
-        // The first file found wins; broken or oversized files are reported, not used.
-        let dir = tempfile::tempdir().unwrap();
-        let (a, b) = (dir.path().join("a.json"), dir.path().join("b.json"));
-        assert_eq!(
-            load_emotion_map(&[a.clone(), b.clone()]),
-            (Value::Null, Value::Null)
-        );
-        fs::write(&b, r#"{"emotions":{"shy":{"params":{"ParamCheek":0.8}}}}"#).unwrap();
-        let (map, info) = load_emotion_map(&[a.clone(), b.clone()]);
-        assert_eq!(map["emotions"]["shy"]["params"]["ParamCheek"], 0.8);
-        assert_eq!(info["source"], b.display().to_string());
-        assert_eq!(info["warnings"], json!([]));
-        fs::write(&a, "{not json").unwrap();
-        let (map, info) = load_emotion_map(&[a.clone(), b.clone()]);
-        assert_eq!(map, Value::Null);
-        assert!(info["error"].as_str().unwrap().starts_with("invalid JSON"));
-        fs::write(
-            &a,
-            format!("{{\"emotions\":{{}},\"pad\":\"{}\"}}", "x".repeat(70_000)),
-        )
-        .unwrap();
-        let (map, info) = load_emotion_map(&[a, b]);
-        assert_eq!(map, Value::Null);
-        assert_eq!(info["error"], "larger than 64 KB");
-        assert!(emotion_map_paths(Path::new("/pet"))[0].ends_with("aster-nongyu.json"));
-    }
-
     // ---- Headless end-to-end check with a stub rig -------------------------------------------
     //
-    // Runs renderer.html in a real Chromium through the real pipeline (asset server, CDP, pacing,
-    // frame decoding) with tests/fixtures/live2d-stub.js standing in for Pixi and the Live2D SDK.
-    // The stub draws the rendered parameter values into each PNG frame, so motion can be measured.
+    // Runs renderer.html and companion.js in a real Chromium through the real pipeline (asset
+    // server, CDP, pacing, frame decoding) with tests/fixtures/live2d-stub.js standing in for Pixi
+    // and the Live2D SDK. The stub draws the rendered parameter values into each PNG frame, so the
+    // effect of every control can be measured, not just its acknowledgement.
     //   ASTER_TEST_CHROME=/path/to/chrome cargo test stub_renderer -- --ignored --nocapture
 
     /// Stub parameters in the order the fixture draws them: id, min, max.
-    const STUB_PARAMS: [(&str, f64, f64); 27] = [
+    const STUB_PARAMS: [(&str, f64, f64); 18] = [
         ("ParamAngleX", -30.0, 30.0),
         ("ParamAngleY", -30.0, 30.0),
         ("ParamAngleZ", -30.0, 30.0),
         ("ParamBodyAngleX", -10.0, 10.0),
-        ("ParamBodyAngleZ", -10.0, 10.0),
         ("ParamEyeBallX", -1.0, 1.0),
         ("ParamEyeBallY", -1.0, 1.0),
         ("ParamEyeLOpen", 0.0, 1.0),
         ("ParamEyeROpen", 0.0, 1.0),
         ("ParamBreath", 0.0, 1.0),
         ("ParamMouthOpenY", 0.0, 1.0),
-        ("ParamEyeLSmile", 0.0, 1.0),
-        ("ParamTeers2", 0.0, 1.0),
-        ("ParamTeers3", 0.0, 1.0),
-        ("ParamMouthForm", -1.0, 1.0),
-        ("ParamBrowLY", -1.0, 1.0),
-        ("ParamBrowAngry", 0.0, 1.0),
-        ("ParamCheek", 0.0, 1.0),
-        ("ParamTear", 0.0, 1.0),
+        ("ParamEyeSmile", 0.0, 1.0),
+        ("ParamEyeSmileR", 0.0, 1.0),
         ("ParamHeartEye", 0.0, 1.0),
-        ("ParamStarEye", 0.0, 1.0),
-        ("ParamAngry", 0.0, 1.0),
-        ("ParamSweat", 0.0, 1.0),
-        ("ParamArmRA", 0.0, 10.0),
-        ("ParamArmLWave", -10.0, 10.0),
-        ("ParamHandChin", 0.0, 1.0),
+        ("ParamTeers3", 0.0, 1.0),
+        ("ParamTeers5", 0.0, 1.0),
+        ("ParamTeers2", 0.0, 1.0),
+        ("ParamMouthForm", -1.0, 1.0),
         ("ParamHairFront", -1.0, 1.0),
-    ];
-    const ANGLES: [&str; 5] = [
-        "ParamAngleX",
-        "ParamAngleY",
-        "ParamAngleZ",
-        "ParamBodyAngleX",
-        "ParamBodyAngleZ",
-    ];
-    const EMOTION_TOGGLES: [&str; 11] = [
-        "ParamTeers2",
-        "ParamTeers3",
-        "ParamCheek",
-        "ParamTear",
-        "ParamHeartEye",
-        "ParamStarEye",
-        "ParamAngry",
-        "ParamSweat",
-        "ParamArmRA",
-        "ParamArmLWave",
-        "ParamHandChin",
     ];
     struct Sample {
         phase: &'static str,
         sequence: u64,
         at: Instant,
         values: HashMap<&'static str, f64>,
-        /// motions started, automatic idle requests, expressions applied, stub frames
-        counters: [u32; 4],
         size: (u32, u32),
-        actions: u64,
     }
     fn test_chrome() -> Option<PathBuf> {
         if let Some(path) = std::env::var_os("ASTER_TEST_CHROME") {
@@ -1971,6 +1669,8 @@ mod tests {
         found.sort();
         found.pop()
     }
+    /// A pet directory laid out like the real one (the default profile's model path), holding the
+    /// stub in place of the vendor SDK and a model definition with an idle motion.
     fn stub_pet(root: &Path, chrome: &Path) -> (PathBuf, PathBuf) {
         let pet = root.join("pet");
         let model = pet.join("弄玉运行档_无水印");
@@ -1992,81 +1692,15 @@ mod tests {
                 "Moc": "stub.moc3",
                 "Textures": ["stub.4096/texture_00.png"],
                 "Physics": "stub.physics3.json",
-                "DisplayInfo": "stub.cdi3.json",
-                "Motions": {
-                    "Idle": [{"File": "motions/idle.motion3.json"}],
-                    "TapBody": [{"File": "motions/tap.motion3.json"}],
-                    "Wave": [{"File": "motions/wave.motion3.json"}],
-                    "手势_鞠躬": [{"File": "motions/bow.motion3.json"}],
-                    "Happy": [{"File": "motions/happy.motion3.json"}]
-                },
-                "Expressions": [
-                    {"Name": "Happy", "File": "expressions/happy.exp3.json"},
-                    {"Name": "害羞", "File": "expressions/shy.exp3.json"}
-                ]
-            },
-            "Groups": [
-                {"Target": "Parameter", "Name": "EyeBlink", "Ids": ["ParamEyeLOpen", "ParamEyeROpen"]},
-                {"Target": "Parameter", "Name": "LipSync", "Ids": ["ParamMouthOpenY"]}
-            ]
+                "Motions": {"Idle": [{"File": "motions/idle.motion3.json"}]}
+            }
         });
         write(&model.join("弄玉.model3.json"), &definition.to_string());
-        // Display names as a Chinese rig would have them.
-        let names = [
-            ("ParamAngleX", "角度 X", "face"),
-            ("ParamTeers2", "Teers2", "emotion"),
-            ("ParamTeers3", "Teers3", "emotion"),
-            ("ParamMouthForm", "嘴型", "face"),
-            ("ParamBrowLY", "左眉", "face"),
-            ("ParamBrowAngry", "生气眉", "face"),
-            ("ParamCheek", "脸红", "emotion"),
-            ("ParamTear", "流泪", "emotion"),
-            ("ParamHeartEye", "爱心眼", "emotion"),
-            ("ParamStarEye", "星星眼", "emotion"),
-            ("ParamAngry", "生气", "emotion"),
-            ("ParamSweat", "汗", "emotion"),
-            ("ParamArmRA", "右手抬起", "arm"),
-            ("ParamArmLWave", "左手挥动", "arm"),
-            ("ParamHandChin", "托腮", "arm"),
-            ("ParamHairFront", "前发", "hair"),
-        ];
-        let cdi = json!({
-            "Version": 3,
-            "Parameters": names.iter().map(|(id, name, group)| json!({"Id": id, "GroupId": group, "Name": name})).collect::<Vec<_>>(),
-            "ParameterGroups": [
-                {"Id": "face", "Name": "脸"}, {"Id": "emotion", "Name": "表情"},
-                {"Id": "arm", "Name": "手臂"}, {"Id": "hair", "Name": "头发"}
-            ]
-        });
-        write(&model.join("stub.cdi3.json"), &cdi.to_string());
         write(&model.join("stub.moc3"), "stub");
         write(&model.join("stub.physics3.json"), "{}");
-        for (file, seconds, amplitude) in [
-            ("idle", 1.5, 6),
-            ("tap", 0.8, 4),
-            ("wave", 1.5, 5),
-            ("bow", 1.4, 4),
-            ("happy", 1.0, 3),
-        ] {
-            write(
-                &model.join(format!("motions/{file}.motion3.json")),
-                &json!({"Version": 3, "Meta": {"Duration": seconds}, "StubAmplitude": amplitude})
-                    .to_string(),
-            );
-        }
         write(
-            &model.join("expressions/happy.exp3.json"),
-            r#"{"Type":"Live2D Expression","Parameters":[{"Id":"ParamEyeLSmile","Value":0.3,"Blend":"Add"}]}"#,
-        );
-        write(
-            &model.join("expressions/shy.exp3.json"),
-            r#"{"Type":"Live2D Expression","Parameters":[{"Id":"ParamEyeLSmile","Value":0.2,"Blend":"Add"}]}"#,
-        );
-        // The user's overrides: a gentler proud, an arm heart, and two things that must be refused.
-        write(
-            &pet.join("aster-nongyu.json"),
-            r#"{"emotions":{"proud":{"params":{"ParamStarEye":0.5,"ParamBrowLY":1}}},
-                "gestures":{"heart":{"params":{"ParamArmRA":[3,7]}}},"bogus":true}"#,
+            &model.join("motions/idle.motion3.json"),
+            &json!({"Version": 3, "Meta": {"Duration": 1.5}, "StubAmplitude": 6}).to_string(),
         );
         let texture = model.join("stub.4096/texture_00.png");
         fs::create_dir_all(texture.parent().unwrap()).unwrap();
@@ -2090,48 +1724,30 @@ mod tests {
         }
         (pet, wrapper)
     }
-    fn decode_stub(frame: &PortraitFrame, phase: &'static str, actions: u64) -> Sample {
+    fn decode_stub(frame: &PortraitFrame, phase: &'static str) -> Sample {
         let rgb = frame.rgb().expect("stub frames decode");
-        let block = |k: u32| {
-            let p = rgb.get_pixel(k * 4 + 1, 1).0;
-            (p, (u32::from(p[0]) << 8) | u32::from(p[1]))
-        };
         let values = STUB_PARAMS
             .iter()
             .enumerate()
             .map(|(k, (id, min, max))| {
-                let (pixel, n) = block(k as u32);
-                assert_eq!(pixel[2], 90, "parameter strip at {id}");
+                let p = rgb.get_pixel(k as u32 * 4 + 1, 1).0;
+                assert_eq!(p[2], 90, "parameter strip at {id}");
+                let n = (u32::from(p[0]) << 8) | u32::from(p[1]);
                 (*id, min + f64::from(n) / 65535.0 * (max - min))
             })
             .collect();
-        let first = STUB_PARAMS.len() as u32;
-        let counters = [first, first + 1, first + 2, first + 3].map(|k| {
-            let (pixel, n) = block(k);
-            assert_eq!(pixel[2], 91, "counter strip");
-            n
-        });
         Sample {
             phase,
             sequence: frame.sequence,
             at: Instant::now(),
             values,
-            counters,
             size: (frame.width, frame.height),
-            actions,
         }
     }
-    fn record(
-        companion: &Companion,
-        phase: &'static str,
-        seconds: f64,
-        samples: &mut Vec<Sample>,
-        mut each: impl FnMut(&Companion),
-    ) {
+    fn record(companion: &Companion, phase: &'static str, seconds: f64, samples: &mut Vec<Sample>) {
         let started = Instant::now();
         let mut last = samples.last().map_or(0, |s| s.sequence);
         while started.elapsed().as_secs_f64() < seconds {
-            each(companion);
             let state = companion.current();
             assert!(
                 !state.status.starts_with("Live2D unavailable"),
@@ -2142,8 +1758,7 @@ mod tests {
                 && frame.sequence != last
             {
                 last = frame.sequence;
-                let actions = state.info["actions"].as_u64().unwrap_or(0);
-                samples.push(decode_stub(&frame, phase, actions));
+                samples.push(decode_stub(&frame, phase));
             }
             thread::sleep(Duration::from_millis(3));
         }
@@ -2164,6 +1779,21 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
     }
+    /// The renderer's acknowledgement of one queued control.
+    fn receipt(companion: &Companion, id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = companion.current();
+            if let Some(found) = state.info["control_results"]
+                .as_array()
+                .and_then(|rs| rs.iter().find(|r| r["id"] == id))
+            {
+                return found.clone();
+            }
+            assert!(Instant::now() < deadline, "no receipt for {id}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
     fn phase<'a>(samples: &'a [Sample], name: &str) -> Vec<&'a Sample> {
         samples.iter().filter(|s| s.phase == name).collect()
     }
@@ -2176,360 +1806,135 @@ mod tests {
             .map(|w| (w[1].values[id] - w[0].values[id]).abs())
             .fold(0.0, f64::max)
     }
-    fn peak(samples: &[&Sample], id: &str) -> f64 {
-        samples
-            .iter()
-            .map(|s| s.values[id])
-            .fold(f64::MIN, f64::max)
-    }
     fn fps_of(samples: &[Sample], name: &str) -> f64 {
         let s = phase(samples, name);
         let (first, last) = (s[0], s[s.len() - 1]);
         (last.sequence - first.sequence) as f64 / last.at.duration_since(first.at).as_secs_f64()
-    }
-    fn ids(list: &Value) -> Vec<String> {
-        list.as_array()
-            .unwrap()
-            .iter()
-            .map(|p| p["id"].as_str().unwrap().to_string())
-            .collect()
     }
     fn r3(v: f64) -> f64 {
         (v * 1000.0).round() / 1000.0
     }
     #[test]
     #[ignore = "needs Chromium: set ASTER_TEST_CHROME or install /opt/pw-browsers"]
-    fn stub_renderer_moves_smoothly_through_the_real_pipeline() {
+    fn stub_renderer_applies_profile_controls_through_the_real_pipeline() {
+        use crate::companion::Control;
         let chrome = test_chrome().expect("set ASTER_TEST_CHROME to a Chromium executable");
         let root = tempfile::tempdir().unwrap();
         let (pet, wrapper) = stub_pet(root.path(), &chrome);
-        let cfg = Config {
-            texture_size: 512,
-            ..config(root.path(), pet, wrapper)
-        };
-        let companion = Companion::start(cfg.clone(), Graphics::Kitty);
-        wait_for_frames(&companion, 2);
+        let cfg = config(root.path(), pet, wrapper);
+        let companion = Companion::start_with(cfg.clone(), FrameFormat::Png);
+        wait_for_frames(&companion, 3);
         let info = companion.current().info;
-        assert_eq!(info["layer_hook"], "afterMotionUpdate", "{info:#}");
-        assert_eq!(info["parameters_missing"], json!(["ParamEyeRSmile"]));
-        assert_eq!(info["texture_sizes"][0]["rendered"], json!([512, 512]));
-        assert_eq!(info["framing"]["face_at"], json!(0.44));
+        assert_eq!(info["api"]["profile"], "弄玉", "{info:#}");
+        assert_eq!(info["api"]["warnings"], json!([]), "every binding exists");
+        assert_eq!(info["texture_sizes"][0]["rendered"], json!([640, 640]));
 
-        // Discovery: display names, groups, toggles by keyword, arms, expressions and motions.
-        let rig = &info["rig"];
-        let cheek = rig["parameters"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["id"] == "ParamCheek")
-            .unwrap();
-        assert_eq!(
-            cheek,
-            &json!({"id":"ParamCheek","name":"脸红","group":"表情","min":0,"max":1,"default":0})
-        );
-        let expect_toggles = [
-            ("shy", vec!["ParamCheek"]),
-            ("love", vec!["ParamHeartEye", "ParamTeers3", "ParamCheek"]),
-            ("cry", vec!["ParamTear", "ParamTeers2"]),
-            ("angry", vec!["ParamAngry", "ParamTeers2", "ParamTeers3"]),
-            ("excited", vec!["ParamStarEye"]),
-            ("worried", vec!["ParamSweat"]),
-            ("embarrassed", vec!["ParamCheek", "ParamSweat"]),
-        ];
-        for (emotion, expected) in &expect_toggles {
-            let found = ids(&rig["emotions"][emotion]["params"]);
-            for id in expected {
-                assert!(
-                    found.contains(&id.to_string()),
-                    "{emotion}: {id} in {found:?}"
-                );
-            }
-        }
-        assert_eq!(
-            rig["emotions"]["proud"]["params"],
-            json!([{"id":"ParamStarEye","value":0.5}])
-        );
-        assert_eq!(rig["emotions"]["shy"]["expression"], "害羞");
-        assert_eq!(rig["emotions"]["happy"]["expression"], "Happy");
-        assert_eq!(rig["emotions"]["happy"]["motion"], "Happy");
-        assert_eq!(
-            rig["arms"],
-            json!([
-                {"id":"ParamArmRA","side":"R","role":"raise"},
-                {"id":"ParamArmLWave","side":"L","role":"wave"},
-                {"id":"ParamHandChin","side":"","role":"chin"}
-            ])
-        );
-        let kinds: serde_json::Map<String, Value> = GESTURES
-            .iter()
-            .map(|g| (g.to_string(), rig["gestures"][g]["kind"].clone()))
-            .collect();
-        assert_eq!(
-            Value::Object(kinds.clone()),
-            json!({"wave":"motion","nod":"procedural","shake":"procedural","tilt":"procedural",
-                   "think":"params","cheer":"params","heart":"params","cover":"procedural",
-                   "stretch":"params","look_around":"procedural","fidget":"procedural","bow":"motion"})
-        );
-        assert_eq!(rig["gestures"]["wave"]["motion"], "Wave");
-        assert_eq!(rig["gestures"]["bow"]["motion"], "手势_鞠躬");
-        assert_eq!(
-            rig["gestures"]["heart"]["params"],
-            json!([{"id":"ParamArmRA","values":[3,7]}])
-        );
-        for protected in ["ParamMouthForm", "ParamBrowLY", "ParamBrowAngry"] {
-            assert!(
-                rig["protected"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(protected))
-            );
-        }
-        let text = rig.to_string();
-        for never in [
-            "ParamBrowLY\",\"value",
-            "ParamBrowAngry\",\"value",
-            "ParamMouthForm\",\"v",
-            "ParamHairFront\",\"v",
-        ] {
-            assert!(!text.contains(never), "{never} must not be driven");
-        }
-        assert!(
-            info["emotion_map"]["warnings"]
-                .to_string()
-                .contains("bogus")
-        );
-        assert!(
-            info["warnings"]
-                .to_string()
-                .contains("ParamBrowLY is protected")
-        );
-
-        // 1. Idle: never still, and a fidget or idle motion within 35 s.
+        // 1. Idle: companion.js owns the bound channels, so she sways gently and the SDK's own
+        //    fast breathing wobble and once-a-second blink in the stub never show.
         let mut samples = Vec::new();
-        companion.motion("idle", "neutral", false, false);
-        record(&companion, "idle", 36.0, &mut samples, |_| {});
+        record(&companion, "idle", 2.0, &mut samples);
         let idle = phase(&samples, "idle");
-        let start = idle[0].at;
-        let first_action = idle
+        let resting = idle
             .iter()
-            .find(|s| s.actions > idle[0].actions)
-            .map(|s| s.at.duration_since(start).as_secs_f64());
-        assert!(
-            first_action.is_some_and(|s| s <= 35.0),
-            "no fidget: {first_action:?}"
-        );
-        let mut stillest = f64::MAX;
-        for window in 0..7 {
-            let (from, to) = (window as f64 * 5.0, window as f64 * 5.0 + 5.0);
-            let part: Vec<&&Sample> = idle
-                .iter()
-                .filter(|s| (from..to).contains(&s.at.duration_since(start).as_secs_f64()))
-                .collect();
-            let moved = ANGLES
-                .iter()
-                .map(|id| {
-                    let v: Vec<f64> = part.iter().map(|s| s.values[id]).collect();
-                    v.iter().copied().fold(f64::MIN, f64::max)
-                        - v.iter().copied().fold(f64::MAX, f64::min)
-                })
-                .fold(0.0, f64::max);
-            stillest = stillest.min(moved);
-        }
-        assert!(
-            stillest >= 1.0,
-            "a 5 s window moved only {stillest} degrees"
-        );
-
-        // 2. Emotions: toggles ease in, then return to rest after the transient expires.
-        let emotions: [(&str, &str, &str, &[&str]); 7] = [
-            ("shy", "emo shy", "after shy", &["ParamCheek"]),
-            (
-                "love",
-                "emo love",
-                "after love",
-                &["ParamHeartEye", "ParamTeers3"],
-            ),
-            ("cry", "emo cry", "after cry", &["ParamTear", "ParamTeers2"]),
-            (
-                "angry",
-                "emo angry",
-                "after angry",
-                &["ParamAngry", "ParamTeers2"],
-            ),
-            ("excited", "emo excited", "after excited", &["ParamStarEye"]),
-            ("worried", "emo worried", "after worried", &["ParamSweat"]),
-            ("happy", "emo happy", "after happy", &[]),
-        ];
-        let before = samples.last().unwrap().counters;
-        for (emotion, during, after, toggles) in emotions {
-            companion.emote(emotion, 1.6);
-            record(&companion, during, 1.7, &mut samples, |_| {});
-            record(&companion, after, 1.3, &mut samples, |_| {});
-            let (on, off) = (phase(&samples, during), phase(&samples, after));
-            for id in toggles {
-                assert!(
-                    peak(&on, id) >= 0.9,
-                    "{emotion}: {id} peaked at {}",
-                    peak(&on, id)
-                );
-                let rest = off.last().unwrap().values[id];
-                assert!(rest <= 0.03, "{emotion}: {id} stayed at {rest}");
-            }
-            // Emotion toggles outside this emotion's catalog stay at rest. Arm parameters are
-            // left out: an idle fidget such as a stretch may move them meanwhile.
-            let catalog = rig["emotions"][emotion]["params"].to_string();
-            for id in EMOTION_TOGGLES
-                .iter()
-                .filter(|id| !id.contains("Arm") && !id.contains("Hand"))
-            {
-                if !catalog.contains(&format!("\"{id}\"")) {
-                    let stray = peak(&on, id);
-                    assert!(stray <= 0.02, "{emotion} moved {id} to {stray}");
-                }
-            }
-        }
-        let after_emotions = samples.last().unwrap().counters;
-        assert!(
-            after_emotions[2] >= before[2] + 2,
-            "害羞 and Happy expressions"
-        );
-        assert!(after_emotions[0] > before[0], "the Happy motion played");
-        assert_eq!(companion.current().info["emotion"], "neutral");
-
-        // 3. Gestures: motion when the rig has one, parameters otherwise, head and body always.
-        companion.motion("listening", "neutral", false, false);
-        record(&companion, "settle", 4.0, &mut samples, |_| {});
-        let gestures: [(&str, &str, f64); 7] = [
-            ("think", "g think", 3.8),
-            ("wave", "g wave", 2.4),
-            ("cheer", "g cheer", 2.6),
-            ("heart", "g heart", 3.2),
-            ("nod", "g nod", 1.6),
-            ("cover", "g cover", 2.9),
-            ("bow", "g bow", 2.2),
-        ];
-        let mut gesture_phases = Vec::new();
-        for (name, label, seconds) in gestures {
-            let counters = samples.last().unwrap().counters;
-            let level = samples.last().unwrap().values["ParamAngleY"];
-            companion.act(name);
-            record(&companion, label, seconds, &mut samples, |_| {});
-            gesture_phases.push(label);
-            let s = phase(&samples, label);
-            let end = s.last().unwrap();
-            match name {
-                "think" => {
-                    assert!(peak(&s, "ParamHandChin") >= 0.9);
-                    assert!(end.values["ParamHandChin"] <= 0.02);
-                }
-                "wave" | "bow" => assert!(end.counters[0] > counters[0], "{name} motion"),
-                "cheer" => {
-                    assert!(peak(&s, "ParamArmRA") >= 8.0);
-                    assert!(end.values["ParamArmRA"] <= 0.5);
-                }
-                "heart" => {
-                    let mid: Vec<&Sample> = s[s.len() / 4..s.len() * 3 / 4].to_vec();
-                    let low = mid
-                        .iter()
-                        .map(|s| s.values["ParamArmRA"])
-                        .fold(f64::MAX, f64::min);
-                    assert!(
-                        peak(&mid, "ParamArmRA") >= 6.0 && low <= 4.0,
-                        "{low}..{}",
-                        peak(&mid, "ParamArmRA")
-                    );
-                    assert!(end.values["ParamArmRA"] <= 0.5);
-                }
-                "nod" => {
-                    let lowest = s
-                        .iter()
-                        .map(|s| s.values["ParamAngleY"])
-                        .fold(f64::MAX, f64::min);
-                    assert!(lowest <= level - 2.5, "nod from {level} to {lowest}");
-                }
-                "cover" => {
-                    assert!(peak(&s, "ParamCheek") >= 0.8, "cover blushes");
-                    assert!(end.values["ParamCheek"] <= 0.05);
-                }
-                _ => unreachable!(),
-            }
-        }
-        let gesture_step = ANGLES
-            .iter()
-            .map(|id| max_step(&samples, &gesture_phases, id))
+            .map(|s| s.values["ParamAngleY"].abs())
             .fold(0.0, f64::max);
-        assert!(gesture_step <= 4.0, "{gesture_step}");
-
-        // 4. Speech: the mouth moves only with speech energy.
-        let mut last_text = Instant::now() - Duration::from_secs(1);
-        companion.motion("speaking", "neutral", false, false);
-        record(&companion, "speaking", 2.5, &mut samples, |c| {
-            if last_text.elapsed() >= Duration::from_millis(70) {
-                last_text = Instant::now();
-                c.speak(6);
-            }
-        });
-        record(&companion, "quiet", 2.5, &mut samples, |_| {});
-        let mouth = |name: &str| -> Vec<f64> {
-            phase(&samples, name)
+        let sway = idle
+            .iter()
+            .map(|s| s.values["ParamAngleX"])
+            .fold(f64::MIN, f64::max)
+            - idle
                 .iter()
-                .map(|s| s.values["ParamMouthOpenY"])
-                .collect()
-        };
-        assert!(mouth("idle").iter().all(|v| *v == 0.0));
-        let speaking = mouth("speaking");
-        let mouth_peak = speaking.iter().copied().fold(0.0, f64::max);
-        let reversals = speaking
-            .windows(3)
-            .filter(|w| (w[1] - w[0]) * (w[2] - w[1]) < 0.0)
-            .count();
-        assert!(
-            mouth_peak > 0.3 && reversals >= 5,
-            "{mouth_peak} {reversals}"
-        );
-        let quiet = mouth("quiet");
-        assert!(
-            quiet[quiet.len() * 3 / 4..].iter().all(|v| *v == 0.0),
-            "{quiet:?}"
-        );
+                .map(|s| s.values["ParamAngleX"])
+                .fold(f64::MAX, f64::min);
+        assert!(sway > 0.05, "she is never still: {sway}");
+        let idle_step = max_step(&samples, &["idle"], "ParamAngleX");
+        assert!(idle_step < 1.0, "smooth: {idle_step}");
 
-        // 5. The canvas follows set_view.
-        companion.set_view(300, 300);
-        record(&companion, "square", 1.0, &mut samples, |_| {});
-        assert_eq!(samples.last().unwrap().size, (300, 300));
+        // 2. An emotion with a strength. The UI's mood follows a frame after the command, as it
+        //    does for /emotion; the strength must survive that.
+        let id = companion
+            .control(Control::Emotion {
+                name: "happy".into(),
+                strength: 0.5,
+            })
+            .unwrap();
+        let ack = receipt(&companion, &id);
+        assert_eq!(ack["ok"], true, "{ack}");
+        assert_eq!(
+            ack["result"]["supported_channels"],
+            json!(["smile_l", "smile_r"])
+        );
+        companion.motion("idle", "happy", false, false);
+        record(&companion, "happy", 0.8, &mut samples);
         let state = companion.current();
+        assert_eq!(state.info["control"]["emotion"], "happy");
+        assert_eq!(state.info["control"]["strength"], 0.5, "mood kept strength");
+        assert!(
+            state.info["control_results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["id"] != "mood"),
+            "{}",
+            state.info["control_results"]
+        );
+        let smile = phase(&samples, "happy").last().unwrap().values.clone();
+        for id in ["ParamEyeSmile", "ParamEyeSmileR"] {
+            assert!((smile[id] - 0.225).abs() < 0.002, "{id} {}", smile[id]);
+        }
 
-        // Smooth throughout the calm and emotional phases; protected parameters never move.
-        let mut calm: Vec<&str> = vec!["idle", "settle", "speaking", "quiet"];
-        for (_, during, after, _) in emotions {
-            calm.push(during);
-            calm.push(after);
-        }
-        let bounds = [
-            ("ParamAngleX", 2.5),
-            ("ParamAngleY", 2.5),
-            ("ParamAngleZ", 2.5),
-            ("ParamBodyAngleX", 1.0),
-            ("ParamBodyAngleZ", 1.0),
-            ("ParamEyeBallX", 0.3),
-            ("ParamEyeBallY", 0.3),
-            ("ParamBreath", 0.15),
-            ("ParamCheek", 0.45),
-            ("ParamHeartEye", 0.45),
-            ("ParamTear", 0.45),
-        ];
-        let mut steps = serde_json::Map::new();
-        for (id, bound) in bounds {
-            let step = max_step(&samples, &calm, id);
-            steps.insert(id.into(), json!(r3(step)));
-            assert!(step <= bound, "{id} jumped {step} in one frame");
-        }
+        // 3. A motion plays once, moves her head, and ends.
+        let id = companion
+            .control(Control::Motion {
+                name: "nod".into(),
+                strength: 1.0,
+            })
+            .unwrap();
+        let ack = receipt(&companion, &id);
+        assert_eq!(ack["ok"], true, "{ack}");
+        assert_eq!(ack["result"]["duration_ms"], 1100);
+        record(&companion, "nod", 1.6, &mut samples);
+        let nodded = phase(&samples, "nod")
+            .iter()
+            .map(|s| s.values["ParamAngleY"])
+            .fold(f64::MIN, f64::max);
+        assert!(nodded > resting + 1.5, "nod {nodded} over {resting}");
+        assert!(companion.current().info["control"]["motion"].is_null());
+
+        // 4. Names the profile does not define are refused by the renderer, with the reason.
+        let id = companion
+            .control(Control::Emotion {
+                name: "missing".into(),
+                strength: 1.0,
+            })
+            .unwrap();
+        let ack = receipt(&companion, &id);
+        assert_eq!(ack["ok"], false);
+        assert!(ack["error"].as_str().unwrap().contains("Unknown emotion"));
+
+        // 5. Reset clears the emotion; the UI's mood follows.
+        let id = companion.control(Control::Reset).unwrap();
+        assert_eq!(receipt(&companion, &id)["ok"], true);
+        companion.motion("idle", "neutral", false, false);
+        record(&companion, "reset", 0.5, &mut samples);
+        let reset = phase(&samples, "reset").last().unwrap().values["ParamEyeSmile"];
+        assert!(reset.abs() < 1e-3, "{reset}");
+        assert_eq!(companion.current().info["control"]["emotion"], "neutral");
+
+        // 6. The canvas follows the pane and keeps the profile's layout.
+        companion.set_view(300, 500);
+        record(&companion, "resized", 1.0, &mut samples);
+        assert_eq!(samples.last().unwrap().size, (300, 500));
+        let framing = companion.current().info["framing"].clone();
+        assert_eq!(framing["width"], 300, "{framing}");
+        assert_eq!(framing["zoom"], 2.7);
+
+        // Parameters the profile does not bind are never touched.
         for s in &samples {
             assert!(s.values["ParamMouthForm"].abs() < 1e-4);
-            assert!(s.values["ParamBrowLY"].abs() < 1e-4);
-            assert_eq!(s.values["ParamBrowAngry"], 0.0);
             assert!(s.values["ParamHairFront"].abs() < 1e-4);
         }
+        let state = companion.current();
         let fps = state.info["fps"].as_f64().unwrap();
         assert!(fps >= 8.0, "{fps}");
         let mut summary = json!({
@@ -2538,14 +1943,10 @@ mod tests {
             "frame_ms": state.info["frame_ms"],
             "page_ms": state.info["page_ms"],
             "frames_sampled": samples.len(),
-            "first_idle_action_s": first_action.map(r3),
-            "stillest_5s_window_deg": r3(stillest),
-            "max_step_calm_and_emotions": steps,
-            "max_angle_step_in_gestures": r3(gesture_step),
-            "gesture_kinds": kinds,
-            "mouth_peak": r3(mouth_peak),
-            "mouth_reversals": reversals,
-            "actions": state.info["actions"],
+            "idle_sway_deg": r3(sway),
+            "idle_max_step_deg": r3(idle_step),
+            "happy_0_5_smile": r3(smile["ParamEyeSmile"]),
+            "nod_peak_deg": r3(nodded),
             "warnings": state.info["warnings"],
         });
         drop(companion);

@@ -91,7 +91,8 @@ def main():
             assert list((state/'exports').glob('*.md'))
             send('/plan','Plan mode')
             send('/build','Build mode')
-            send('/mood happy','happy')
+            # A profile emotion is a renderer control; without the renderer it says so.
+            send('/mood happy','Companion control queued' if args.live2d else 'Live2D is hidden')
             if args.live2d:
                 deadline=time.monotonic()+65
                 while time.monotonic()<deadline:

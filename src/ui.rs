@@ -395,6 +395,20 @@ pub struct App {
     /// The conversation's provider name and context window.
     endpoint: (String, u64),
     provider_test: Option<crossbeam_channel::Receiver<String>>,
+    /// The provider's choice of her emotion and motion after a reply, while it is being asked,
+    /// with the conversation it was asked for.
+    expression: Option<(
+        String,
+        crossbeam_channel::Receiver<
+            Result<crate::expression::Expression, crate::expression::Failed>,
+        >,
+    )>,
+    /// Whether finished replies ask the provider for her expression.
+    expression_on: bool,
+    /// The last expression query's result, for /status and /pet query.
+    expression_note: String,
+    /// Expression-query tokens that arrived while a turn was running; added when it finishes.
+    usage_carry: (u64, u64),
     /// The checkpoint id before a /compact the user started, to show its result.
     compacting: Option<Option<String>>,
     quit: bool,
@@ -402,6 +416,7 @@ pub struct App {
 }
 impl App {
     pub fn new(cfg: Config, cli: Cli, store: Store) -> Result<Self> {
+        let expression_on = cli.companion_query == "on";
         let mut session = if let Some(id) = &cli.resume {
             store.load(id)?
         } else if cli.continue_last {
@@ -474,6 +489,10 @@ impl App {
             meter: None,
             endpoint,
             provider_test: None,
+            expression: None,
+            expression_on,
+            expression_note: String::new(),
+            usage_carry: (0, 0),
             compacting: None,
             quit: false,
             quit_started: None,
@@ -766,9 +785,9 @@ impl App {
        }
    },
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true);self.notify("弄玉 looks toward you");}else{self.notify("Live2D is hidden · /pet on shows her");}self.reaction=Some(("listening".into(),Instant::now()));},
-   "/pet"=>{match arg { "info" => {self.info("Companion interface v1",serde_json::to_string_pretty(&json!({"api":self.portrait.info["api"],"control":self.portrait.info["control"],"results":self.portrait.info["control_results"]}))?);}, "reset" => {self.companion.as_ref().context("Live2D is hidden; use /pet on")?.control(crate::companion::Control::Reset)?;self.mood="neutral".into();self.notify("Companion reset queued · /pet info shows the renderer result");}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, off, retry, info or reset") }self.last_image=None;},
+   "/pet"=>{match arg { "query" => {self.info("Companion query",format!("{}\n\nAfter each reply, Aster makes one small structured request to the conversation's provider, asking which of her profile's emotions (with a strength) and motions fit. The answer is checked against the profile and applied through the Companion API; the renderer confirms or refuses it (/pet info). No tools, never shown in the transcript, never retried; its tokens count toward the session's usage.\n\nLast result: {}\n\n/pet query on · /pet query off",if self.expression_on{"On"}else{"Off"},if self.expression_note.is_empty(){"none yet"}else{&self.expression_note}));}, "query on" => {self.expression_on=true;self.notify("Companion query on · asked after each reply");}, "query off" => {self.expression_on=false;self.notify("Companion query off · her expression changes only with /emotion and /motion");}, "info" => {self.info("Companion interface v1",serde_json::to_string_pretty(&json!({"api":self.portrait.info["api"],"control":self.portrait.info["control"],"results":self.portrait.info["control_results"]}))?);}, "reset" => {self.companion.as_ref().context("Live2D is hidden; use /pet on")?.control(crate::companion::Control::Reset)?;self.mood="neutral".into();self.notify("Companion reset queued · /pet info shows the renderer result");}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, off, retry, info, reset or query") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
-   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo".to_string()}else{self.endpoint.0.clone()},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&{let mut info=self.portrait.info.clone();if let Some(api)=info.get_mut("api"){*api=json!(format!("{} parameters · /pet info shows them",api["parameters"].as_array().map_or(0,|p|p.len())));}info})?,self.cfg.limits.describe())),
+   "/status"=>{let expression=format!("upstream query {} · {}",if self.expression_on{"on"}else{"off"},if self.expression_note.is_empty(){"none yet"}else{&self.expression_note});self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nExpression {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo".to_string()}else{self.endpoint.0.clone()},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,expression,self.portrait.frames,serde_json::to_string_pretty(&{let mut info=self.portrait.info.clone();if let Some(api)=info.get_mut("api"){*api=json!(format!("{} parameters · /pet info shows them",api["parameters"].as_array().map_or(0,|p|p.len())));}info})?,self.cfg.limits.describe()));},
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
    "/help"=>self.info("Make yourself at home",format!("{}\n\nWRITING\nEnter send · Ctrl+J, Shift+Enter or \\ Enter new line\n↑↓ move between lines, then through earlier requests\nAlt/Ctrl+←→ or Alt+B/F word · Home/End line · Ctrl+A/E line\nCtrl+W or Alt+Backspace delete word · Ctrl+U/K delete to line start/end\nEsc Esc clears the draft (↑ brings it back) · Ctrl+C clears, then quits\n\nREADING\nPgUp/PgDn page · Shift+↑↓ or wheel 3 lines · Ctrl+Home top · Ctrl+End or Esc latest\nCtrl+O shows tool details · F7 searches history\n\nWORKING\nWhile 弄玉 works: Enter steers · Alt+Enter queues · Ctrl+G redirects · Esc stops\nCtrl+P sessions (Enter open · Ctrl+N new · Ctrl+D delete)\nF1 or click 弄玉 for local task controls · F2 plan · F3 review · F4 output\nF5 checks · F6 files · F7 history · F8 tasks\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
@@ -1006,6 +1025,99 @@ impl App {
         self.notice.clear();
         Ok(())
     }
+    /// After a reply, ask the conversation's provider how 弄玉 should look: one small structured
+    /// request, never retried. Aster itself does not choose.
+    fn ask_expression(&mut self) {
+        if !self.expression_on
+            || self.session.demo
+            || self.companion.is_none()
+            || self.expression.is_some()
+            || self.quit
+            || matches!(self.session.status.as_str(), "stopped" | "interrupted")
+        {
+            return;
+        }
+        let Some(moment) = crate::expression::Moment::of(&self.session) else {
+            return;
+        };
+        let profile = crate::companion::Profile::load(self.cfg.companion_profile.as_deref());
+        match (self.turn_config(), profile) {
+            (Ok(cfg), Ok(profile)) if !cfg.key.is_empty() => {
+                self.expression_note = "asking the provider…".into();
+                self.expression = Some((
+                    self.session.id.clone(),
+                    crate::expression::spawn(cfg, self.session.model.clone(), profile, moment),
+                ));
+            }
+            (Ok(cfg), Ok(_)) => {
+                self.expression_note = format!("not asked · {} has no API key", cfg.provider)
+            }
+            (Err(e), _) | (_, Err(e)) => self.expression_note = format!("not asked · {e}"),
+        }
+    }
+    /// Apply the provider's choice through the Companion API; the renderer confirms or refuses it.
+    fn apply_expression(
+        &mut self,
+        result: Result<crate::expression::Expression, crate::expression::Failed>,
+    ) -> Result<()> {
+        use crate::companion::Control;
+        match result {
+            Ok(x) => {
+                if self.running.is_some() {
+                    self.usage_carry.0 += x.input_tokens;
+                    self.usage_carry.1 += x.output_tokens;
+                } else {
+                    self.session.input_tokens += x.input_tokens;
+                    self.session.output_tokens += x.output_tokens;
+                    self.persist()?;
+                }
+                let chosen = format!(
+                    "{} {:.2}{}",
+                    x.emotion,
+                    x.strength,
+                    x.motion
+                        .as_ref()
+                        .map(|m| format!(" + {m}"))
+                        .unwrap_or_default()
+                );
+                let queued = match &self.companion {
+                    None => Err(anyhow::anyhow!("Live2D is hidden")),
+                    Some(c) => c
+                        .control(Control::Emotion {
+                            name: x.emotion.clone(),
+                            strength: x.strength,
+                        })
+                        .and_then(|_| match &x.motion {
+                            Some(m) => c
+                                .control(Control::Motion {
+                                    name: m.clone(),
+                                    strength: x.strength,
+                                })
+                                .map(|_| ()),
+                            None => Ok(()),
+                        }),
+                };
+                self.expression_note = match queued {
+                    Ok(()) => format!(
+                        "{chosen} · {} input / {} output tokens",
+                        x.input_tokens, x.output_tokens
+                    ),
+                    Err(e) => format!("{chosen} · not applied: {e}"),
+                };
+            }
+            Err(failed) => {
+                self.expression_note = format!("failed · {}", failed.reason);
+                if failed.lasting && self.expression_on {
+                    self.expression_on = false;
+                    self.notify(format!(
+                        "Companion query paused: {} · /pet query on asks again",
+                        failed.reason
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
     fn stop(&mut self) {
         if let Some(r) = &self.running {
             r.cancel.store(true, Ordering::Relaxed);
@@ -1039,6 +1151,34 @@ impl App {
                 panel.message = result.clone();
             }
             self.notify(result);
+        }
+        let arrived = match self.expression.as_ref().map(|(_, rx)| rx.try_recv()) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(crossbeam_channel::TryRecvError::Disconnected)) => {
+                Some(Err(crate::expression::Failed {
+                    reason: "the request stopped unexpectedly".into(),
+                    lasting: false,
+                }))
+            }
+            _ => None,
+        };
+        if let Some(result) = arrived
+            && let Some((id, _)) = self.expression.take()
+        {
+            if id == self.session.id {
+                self.apply_expression(result)?;
+            } else if let Ok(x) = result {
+                // The conversation changed meanwhile: its tokens still belong to the one asked for,
+                // and an expression about it is not shown in another.
+                let mut asked = self.store.load(&id)?;
+                asked.input_tokens += x.input_tokens;
+                asked.output_tokens += x.output_tokens;
+                self.store.save(&asked)?;
+                self.expression_note = format!(
+                    "not applied · the conversation changed ({} input / {} output tokens)",
+                    x.input_tokens, x.output_tokens
+                );
+            }
         }
         let mut advance_queue = false;
         let events = self
@@ -1167,6 +1307,9 @@ impl App {
                     let pending = std::mem::take(&mut self.session.pending);
                     self.session = *session;
                     self.session.pending = pending;
+                    let (input, output) = std::mem::take(&mut self.usage_carry);
+                    self.session.input_tokens += input;
+                    self.session.output_tokens += output;
                     if self.session.work.has_failures() {
                         self.notify("A check or command failed · F4 output · /work details");
                         self.reaction = Some(("concerned".into(), Instant::now()));
@@ -1183,6 +1326,7 @@ impl App {
                     if self.quit_started.is_some() {
                         self.quit = true;
                     }
+                    self.ask_expression();
                     // A checkpoint you asked for opens its report, as the local one always has.
                     if let Some(before) = self.compacting.take()
                         && self.session.checkpoint.as_ref().map(|c| c.id.clone()) != before
@@ -4837,6 +4981,173 @@ mod layout_tests {
         a.command("/new").unwrap();
         assert_eq!(a.session.provider.as_deref(), Some("local-test"));
         assert_eq!(a.session.model, "test-model");
+    }
+    #[test]
+    fn a_reply_asks_the_provider_for_her_expression_and_queues_it() {
+        let d = tempfile::tempdir().unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        // The conversation's provider answers the turn (streamed), then the expression query.
+        let seen = std::thread::spawn(move || {
+            let mut bodies = vec![];
+            for _ in 0..2 {
+                let mut request = server.recv().unwrap();
+                let key = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("x-api-key"))
+                    .map(|h| h.value.to_string());
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let reply = if body["stream"] == true {
+                    [
+                        json!({"type":"message_start","message":{"usage":{"input_tokens":40}}}),
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Fixed it, and the test passes now."}}),
+                        json!({"type":"content_block_stop","index":0}),
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}),
+                        json!({"type":"message_stop"}),
+                    ]
+                    .iter()
+                    .map(|v| format!("data: {v}\n\n"))
+                    .collect::<String>()
+                } else {
+                    json!({"stop_reason":"end_turn","content":[{"type":"text","text":"{\"emotion\":\"happy\",\"strength\":0.7,\"motion\":\"nod\"}"}],"usage":{"input_tokens":300,"output_tokens":20}}).to_string()
+                };
+                request
+                    .respond(tiny_http::Response::from_string(reply))
+                    .unwrap();
+                bodies.push((key, body));
+            }
+            bodies
+        });
+        let mut a = app(d.path());
+        let mut registry = crate::providers::Registry::default();
+        registry
+            .upsert(
+                crate::providers::Provider {
+                    id: String::new(),
+                    name: "Local test".into(),
+                    base,
+                    auth: crate::providers::Auth::XApiKey,
+                    key: "sk-local-SECRET-5151".into(),
+                    models: vec![crate::providers::Model {
+                        name: "test-model".into(),
+                        context: Some(64_000),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+        registry
+            .save(&crate::providers::Registry::path(&a.cfg.state))
+            .unwrap();
+        a.session.demo = false;
+        a.session.provider = Some("local-test".into());
+        a.session.model = "test-model".into();
+        // A renderer that cannot start still holds queued controls, so they can be inspected.
+        let companion = Companion::start(a.cfg.clone(), Graphics::Iterm);
+        let shared = companion.shared.clone();
+        a.companion = Some(companion);
+        a.submit("fix the test".into()).unwrap();
+        finish(&mut a);
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while a.expression.is_some() {
+            assert!(Instant::now() < deadline, "{}", a.expression_note);
+            a.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let bodies = seen.join().unwrap();
+        let (key, query) = &bodies[1];
+        assert_eq!(key.as_deref(), Some("sk-local-SECRET-5151"));
+        assert_eq!(query["model"], "test-model");
+        assert_eq!(query["output_config"]["format"]["type"], "json_schema");
+        assert!(query.get("tools").is_none() && query.get("stream").is_none());
+        let asked = query["messages"][0]["content"].as_str().unwrap();
+        assert!(asked.contains("fix the test") && asked.contains("the test passes now"));
+        let commands = shared.lock().unwrap().motion.commands.clone();
+        let commands: Vec<Value> = commands.iter().map(|c| c["command"].clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                json!({"type":"emotion","name":"happy","strength":0.7}),
+                json!({"type":"motion","name":"nod","strength":0.7}),
+            ]
+        );
+        // Aster did not choose: the UI's own mood is untouched, and the query's tokens count.
+        assert_eq!(a.mood, "neutral");
+        assert_eq!((a.session.input_tokens, a.session.output_tokens), (340, 29));
+        assert!(a.expression_note.starts_with("happy 0.70 + nod"));
+        let saved =
+            fs::read_to_string(a.store.root.join(format!("{}.json", a.session.id))).unwrap();
+        assert!(!saved.contains("SECRET") && !saved.contains("output_config"));
+        assert!(!a.session.entries.iter().any(|e| e.text.contains("emotion")));
+
+        // Switched off, a reply asks nothing; demo sessions never ask.
+        a.command("/pet query off").unwrap();
+        a.ask_expression();
+        assert!(a.expression.is_none());
+        a.command("/pet query on").unwrap();
+        a.session.demo = true;
+        a.ask_expression();
+        assert!(a.expression.is_none());
+        // Nobody to show it to: with Live2D hidden nothing is asked.
+        a.session.demo = false;
+        a.companion = None;
+        a.ask_expression();
+        assert!(a.expression.is_none());
+    }
+    #[test]
+    fn a_late_expression_stays_with_the_conversation_it_was_asked_for() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        let mut earlier = a.session.clone();
+        earlier.id = "0123456789ab".into();
+        a.store.save(&earlier).unwrap();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(Ok(crate::expression::Expression {
+            emotion: "happy".into(),
+            strength: 0.5,
+            motion: None,
+            input_tokens: 300,
+            output_tokens: 20,
+        }))
+        .unwrap();
+        a.expression = Some((earlier.id.clone(), rx));
+        let before = (a.session.input_tokens, a.session.output_tokens);
+        a.tick().unwrap();
+        assert!(a.expression.is_none());
+        assert_eq!((a.session.input_tokens, a.session.output_tokens), before);
+        let saved = a.store.load("0123456789ab").unwrap();
+        assert_eq!(
+            (saved.input_tokens, saved.output_tokens),
+            (earlier.input_tokens + 300, earlier.output_tokens + 20)
+        );
+        assert!(a.expression_note.contains("conversation changed"));
+    }
+    #[test]
+    fn a_rejected_expression_query_pauses_until_asked_again() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.apply_expression(Err(crate::expression::Failed {
+            reason: "Local test returned HTTP 400: output_config unsupported".into(),
+            lasting: true,
+        }))
+        .unwrap();
+        assert!(!a.expression_on);
+        assert!(a.notice.contains("Companion query paused"));
+        a.apply_expression(Err(crate::expression::Failed {
+            reason: "timed out after 30 seconds".into(),
+            lasting: false,
+        }))
+        .unwrap();
+        assert_eq!(a.expression_note, "failed · timed out after 30 seconds");
+        a.command("/pet query on").unwrap();
+        assert!(a.expression_on);
+        a.command("/pet query").unwrap();
+        let text = screen(&mut a, 132, 42);
+        assert!(text.contains("Companion query") && text.contains("never retried"));
     }
     #[test]
     fn multiline_composer_follows_the_cursor() {

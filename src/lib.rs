@@ -6,6 +6,7 @@ pub mod composer;
 pub mod config;
 pub mod context;
 pub mod edits;
+pub mod expression;
 pub mod history;
 pub mod instructions;
 pub mod lifecycle;

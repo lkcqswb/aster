@@ -44,6 +44,7 @@ The companion pane is part of the terminal layout, not a separate window. iTerm2
 - Click the portrait or use `/look` for a glance and nod.
 - `/emotion happy 0.7` (or `/mood happy`) changes her expression; `/motion nod` plays a gesture.
 - `/emotion` and `/motion` list configured names; `/pet reset` clears custom controls; `/pet info` inspects the actual interface.
+- `/pet query` shows the upstream expression query and its last result; `/pet query on|off` switches it.
 - `/pet off` releases the renderer; `/pet on` starts it again.
 - `/pet retry` restarts the renderer after a failed launch. Loading stages and the actual error appear in the companion pane; `/status` includes the failed stage.
 
@@ -53,7 +54,7 @@ Her work card tracks the active plan step, file or command, pending decision, an
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
 
-Aster never picks an emotion or gesture for her from reply text or events. Emotions and motions come only from explicit controls: `/emotion`, `/motion`, or a caller of the companion interface (`Companion::control`), and each is confirmed or refused by the renderer. Between controls, her profile's controller keeps her alive from actual application state: slow sway and breathing, periodic blinks, and a pose for each work state (attentive while you type or a decision waits, eyes on the work while reading, mouth moving while text streams). Emotions and motions are applied on top and clamped to the rig's real parameter ranges; parameters the profile does not bind are never driven. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
+Aster never picks an emotion or gesture for her itself. After each reply, it asks the conversation's own provider in one small structured request (`output_config.format` with a JSON Schema limited to her profile's emotion and motion names): which emotion, how strongly, and which motion, if any. The answer is checked against the profile and applied through the companion interface (`Companion::control`), where the renderer confirms or refuses it. The request carries no tools, never appears in the transcript, is never retried, and its tokens count toward the session's usage. A rejected request (for example a provider without structured outputs) pauses the query until `/pet query on`; `/pet query off` or `--companion-query off` turns it off, and demo sessions or a hidden companion never ask. `/emotion` and `/motion` remain direct controls. Between controls, her profile's controller keeps her alive from actual application state: slow sway and breathing, periodic blinks, and a pose for each work state (attentive while you type or a decision waits, eyes on the work while reading, mouth moving while text streams). Emotions and motions are applied on top and clamped to the rig's real parameter ranges; parameters the profile does not bind are never driven. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
 
 By default Aster reads existing assets here:
 

@@ -111,4 +111,13 @@ JSON 消息入口为 `controller.dispatch(command)`：
 
 这是可嵌入的模块接口和 Rust 桥接接口，**没有公开 HTTP 控制服务**。现有本地资源服务仍使用随机路径、Host 检查和文件白名单。模型中引用的 textures/physics/pose/motions/expressions 可本地加载；本版命名控制采用上面的参数动作/表情格式，不提供直接播放任意原生动作或音频的命令。
 
+## 由上游决定表情和动作
+
+Aster 自身不选择弄玉的表情或动作。每轮回复结束后，Aster 向当前对话的同一 provider 发送一次结构化请求：`output_config.format` 使用 JSON Schema，`emotion` 与 `motion` 只能取当前配置里的名字，另有 0–1 的 `strength`（结构化输出不支持数值范围约束，由 Aster 本地校验）。结果经配置校验后通过 `Companion::control` 发送，渲染器回执决定是否接受；表情与动作使用同一强度。
+
+- 请求不带 tools、不流式、`max_tokens` 1024、30 秒超时，**失败不自动重试**；输入只含本轮请求与回复文本（有长度上限）和结束状态，token 计入会话用量。
+- 请求被拒绝（如 provider 不支持结构化输出、key 或模型无效）时本会话暂停查询并提示，`/pet query on` 重新开启；超时或服务端错误只跳过这一轮。
+- `/pet query` 查看状态和最近结果，`/pet query on|off` 切换；`--companion-query off`（或 `ASTER_COMPANION_QUERY=off`）默认关闭。演示会话和隐藏的伴侣不会发送请求。
+- 实现见 `src/expression.rs`；端到端测试 `scripts/test_expression_e2e.py` 使用本地替身 provider 和测试用桩模型。
+
 上游集成依据：[Pixi Live2DModel](https://guansss.github.io/pixi-live2d-display/api/classes/index.Live2DModel.html)、[Cubism4 更新顺序](https://github.com/guansss/pixi-live2d-display/blob/master/src/cubism4/Cubism4InternalModel.ts)。本仓库的接口代码不替代相应 SDK/模型的许可。

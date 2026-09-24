@@ -81,4 +81,10 @@ Markdown replies with styled headings, emphasis, inline code, nested lists, task
 
 Local project task discovery and explicit task configuration, an F8 picker beside the companion, inspect-before-run controls and the existing approval/output/cancellation pipeline. Task browsing preserves pending decisions and drafts; execution needs no model request. Headless turns return a failing status for unresolved failed or stale checks, while a repaired check can succeed and ordinary conversation does not imply verification.
 
+## Delivered in 0.18
+
+A keyboard that behaves like a text editor and a transcript that cannot strand you: ↑/↓ move within the draft and then through earlier requests, while reading uses bounded paging with a visible "newer lines" marker and Esc/Ctrl+End back to the latest. Readline word motion (including macOS Option-arrows, which previously typed letters), recoverable draft clearing, a session picker with activity and message counts, create/delete controls and a sensible default selection. A redesigned layout with a rounded composer that shows mode and run state, content-sized panels with their hints on the border, and a context meter.
+
+Per-turn limits are configurable and higher by default. Auto-compact archives the full context and replaces older exchanges with a model-written summary from one bounded, tool-free request before a request would crowd the window, falling back to local excerpts without retrying. New file tools and a reworked Live2D presentation are described in their own documents.
+
 Next: preserve queued work when a turn needs attention, and make resuming that work explicit.

@@ -52,4 +52,8 @@ Check identities and edit revisions distinguish current failures, successful rep
 
 Project-aware file listing and search with ignore rules, scopes, globs, case control, regular expressions, context lines and honest continuation/scan limits. Large-source reads continue through long Unicode lines; focused edits preserve the rest of files up to 2 MB. The companion records actual discovered locations in her work card.
 
-Next: a project picker beside the companion and direct navigation from search results.
+## Delivered in 0.11
+
+A local, asynchronous file/search picker beside the companion, numbered source previews, result/source pagination and validated references added to the existing draft. The reading pose follows the open preview; browsing does not start a model request or replace task evidence. Selected context can come from source files up to 2 MB while excerpt limits remain bounded.
+
+Next: make the companion's task controls easier to discover and strengthen long-running conversation management.

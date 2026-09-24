@@ -10,7 +10,7 @@ Review @src/main.rs:10-40.
 Read @{docs/design notes.md:1-80}
 ```
 
-Only explicit references in the user's message are attached. Email addresses are not file references. Braces support spaces and literal punctuation in filenames. Without a range, Aster includes the first 200 lines. References are limited to eight files, 500 lines per range, 16 KB per excerpt and 48 KB combined. The source file must be under 128 KB. File tools can read more pages later.
+Only explicit references in the user's message are attached. Email addresses are not file references. Braces support spaces and literal punctuation in filenames. Without a range, Aster includes the first 200 lines. References are limited to eight files, 500 lines per range, 16 KB per excerpt and 48 KB combined. The source file may be up to 2 MB. File tools can read more pages later.
 
 Nested AGENTS.md guidance is included before the attached file is used. Traversal, symlinks and credential/private paths are rejected. Invalid references stop preparation before any provider request. Steering can carry references too; if an attachment fails during a turn, the model receives an explicit failure rather than fabricated file content.
 

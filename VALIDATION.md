@@ -1,3 +1,12 @@
+# Companion project picker 0.11 — 2026-09-24
+
+- **62 Rust tests passed**, plus formatting, Clippy with warnings denied and release build. New cases cover replacing an in-flight query, case-insensitive filename filtering, result/source pagination in both directions, large-file preview ranges, and attaching to an existing draft without submitting it.
+- The actual animated terminal flow opened F6, filtered a filename, read and paged through its preview, attached lines 41–80 while preserving the draft, searched a larger file, previewed line 8,001 and attached lines 7,997–8,002. Only an explicit Enter submitted that context. Source files stayed unchanged; **34 distinct frames**, resize and exit 0 were observed. Evidence: `.aster/qa/navigator-e2e.json`. No API requests were made.
+- The context/skills and general session/approval/fork/export terminal regressions passed. The actual file picker and model were rendered and visually inspected in `.aster/qa/aster-files.png`.
+- Source previews run on cancellable background workers. The selected excerpt remains bounded to 16 KB; raising the source-file limit to 2 MB does not attach an entire large file.
+
+---
+
 # Project navigation and larger sources 0.10 — 2026-09-24
 
 - **58 Rust tests passed**, covering root/nested ignore rules during scoped searches, exact list and matching-line pagination, regex/case/context controls, invalid ignore diagnostics, cancellation, binary/oversize skips, symlink/private-path exclusions, case-insensitive credential names and focused large-file edits. Formatting, Clippy with warnings denied and release build passed.

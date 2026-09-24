@@ -348,7 +348,8 @@ pub fn prepare(project: &Path, prompt: &str, catalog: &Catalog) -> Result<Prepar
             .filter(|(_, r)| r.chars().all(|c| c.is_ascii_digit() || c == '-'))
             .map_or((reference.as_str(), None), |(f, r)| (f, Some(r)));
         let path = tools::path(project, file)?;
-        let text = read_bounded(&path, 128_000).with_context(|| format!("Cannot attach {file}"))?;
+        let text =
+            crate::project::text(project, file).with_context(|| format!("Cannot attach {file}"))?;
         let lines = text.lines().collect::<Vec<_>>();
         let (first, last) = if let Some(range) = range {
             let (first, last) = range.split_once('-').unwrap_or((range, range));

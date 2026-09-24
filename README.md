@@ -95,6 +95,7 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/prompts`, `/prompt NAME args` | Browse and use reusable task prompts |
 | `/reload` | Refresh and inspect project resource discovery |
 | `/agents` | Inspect the AGENTS.md files loaded for this project |
+| `/files [name or glob]`, `/find TEXT` | Browse source and search beside 弄玉; F6 opens files |
 | `/init` | Create a small AGENTS.md starter, without replacing an existing one |
 | `/plan`, `/build` | Switch between reading/planning and work with tools |
 | `/permissions ask\|allow\|deny` | Control file-write and shell approval |

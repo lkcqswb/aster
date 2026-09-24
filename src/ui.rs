@@ -55,6 +55,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/prompt", "Use a reusable prompt"),
     ("/reload", "Refresh project instructions and resources"),
     ("/agents", "Inspect AGENTS.md instructions"),
+    ("/files", "Browse and attach project files"),
+    ("/find", "Find text and inspect matching lines"),
     ("/init", "Create project guidance if missing"),
     ("/plan", "Think and read · no edits"),
     ("/build", "Work with file and shell tools"),
@@ -159,6 +161,7 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    Project(Box<crate::navigator::Navigator>),
     Resources {
         items: Vec<crate::context::Resource>,
         skills: bool,
@@ -304,7 +307,10 @@ impl App {
     }
     fn paste(&mut self, text: &str) {
         let text = clean(text);
-        if let Some(Popup::Question { input, .. } | Popup::Redirect { input, .. }) = &mut self.popup
+        if let Some(Popup::Project(nav)) = &mut self.popup {
+            nav.paste(&text);
+        } else if let Some(Popup::Question { input, .. } | Popup::Redirect { input, .. }) =
+            &mut self.popup
         {
             if input.len() + text.len() <= 2000 {
                 input.push_str(&text);
@@ -373,6 +379,8 @@ impl App {
                 | "/queue"
                 | "/context"
                 | "/skills"
+                | "/files"
+                | "/find"
                 | "/prompts"
                 | "/drop"
         ) && self.busy_guard()
@@ -391,6 +399,7 @@ impl App {
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
    "/work"=>self.show_work(),
+   "/files"|"/find"=>{if matches!(self.popup,Some(Popup::Approval(_)|Popup::Question{..}|Popup::Redirect{..})){self.notify("Answer or dismiss the pending decision first.");}else{self.popup=Some(Popup::Project(Box::new(crate::navigator::Navigator::new(self.cfg.project.clone(),if cmd=="/files"{crate::navigator::Mode::Files}else{crate::navigator::Mode::Search},arg.into()))));}},
    "/checks"=>self.info("Checks beside 弄玉",self.session.work.checks_summary()),
    "/run"=>{if arg.is_empty(){bail!("Use /run followed by a shell command")};self.submit(format!("/run {arg}"))?;},
    "/output"=>self.info("Command output · 弄玉",self.session.work.command.as_ref().map(|c|c.summary()).unwrap_or_else(||"No command has run in this turn.\nCommand output appears here while it runs.\nF4 opens this view.".into())),
@@ -680,6 +689,9 @@ impl App {
         }
     }
     fn tick(&mut self) -> Result<()> {
+        if let Some(Popup::Project(nav)) = &mut self.popup {
+            nav.tick();
+        }
         let mut advance_queue = false;
         let events = self
             .running
@@ -846,6 +858,8 @@ impl App {
             } else {
                 self.state.as_str()
             }
+        } else if matches!(&self.popup,Some(Popup::Project(nav)) if nav.reading() || nav.busy()) {
+            "reading"
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
         } else if self.session.work.has_failures() || self.session.work.has_stale_checks() {
@@ -896,12 +910,46 @@ impl App {
             self.command("/checks")?;
             return Ok(());
         }
+        if key.code == KeyCode::F(6) {
+            self.command("/files")?;
+            return Ok(());
+        }
         if key.code == KeyCode::F(3) {
             self.command("/review")?;
             return Ok(());
         }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::Project(mut nav) => {
+                    match nav.key(key) {
+                        crate::navigator::Action::Keep => self.popup = Some(Popup::Project(nav)),
+                        crate::navigator::Action::Close => {}
+                        crate::navigator::Action::Notice(message) => {
+                            self.notify(message);
+                            self.popup = Some(Popup::Project(nav));
+                        }
+                        crate::navigator::Action::Attach(reference) => {
+                            if self.input.len() + reference.len() + 1 > 32_000 {
+                                self.notify(
+                                    "The draft is full. Shorten it before attaching a file.",
+                                );
+                                self.popup = Some(Popup::Project(nav));
+                            } else {
+                                let text = if self.input.trim().is_empty() {
+                                    format!("{reference} ")
+                                } else {
+                                    format!("{} {reference} ", self.input.trim_end())
+                                };
+                                self.input_set(text);
+                                self.last_type = Instant::now();
+                                self.notify(
+                                    "Reference added to your draft · Enter sends it to 弄玉",
+                                );
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
                 Popup::Resources {
                     items,
                     skills,
@@ -1398,7 +1446,8 @@ impl App {
                 self.session.pending.len()
             )
         } else if self.notice.is_empty() {
-            "↵ send   / commands   F2 work   F3 review   Ctrl+P sessions   Esc stop".into()
+            "↵ send   / commands   F2 work   F3 review   F6 files   Ctrl+P sessions   Esc stop"
+                .into()
         } else {
             clean(&self.notice)
         };
@@ -1445,6 +1494,7 @@ impl App {
             let decision = matches!(
                 popup,
                 Popup::Approval(_)
+                    | Popup::Project(_)
                     | Popup::Question { .. }
                     | Popup::Redirect { .. }
                     | Popup::Resources { .. }
@@ -1576,6 +1626,10 @@ impl App {
             "your decision"
         } else if self.running.is_some() {
             self.session.work.activity.as_str()
+        } else if matches!(&self.popup,Some(Popup::Project(nav)) if nav.reading()) {
+            "reading together"
+        } else if matches!(&self.popup, Some(Popup::Project(_))) {
+            "finding the right context"
         } else if self.last_type.elapsed() < Duration::from_secs(2) && !self.input.is_empty() {
             "listening"
         } else if self.session.work.has_failures() {
@@ -1774,6 +1828,7 @@ impl App {
             vertical: 2,
         });
         let (title,text,scroll)=match p{
+   Popup::Project(nav)=>nav.view(inner.width as usize,inner.height as usize),
    Popup::Resources{items,skills,query,index}=>{let filtered=items.iter().filter(|r|format!("{} {}",r.name,r.description).to_lowercase().contains(&query.to_lowercase())).collect::<Vec<_>>();let visible=(inner.height.saturating_sub(6)/3).max(1) as usize;let mut text=format!("Find: {query}\n\n");for (i,r) in filtered.iter().enumerate().skip(index.saturating_sub(visible-1)).take(visible){text+=&format!("{} {}{}\n  {}\n\n",if i==*index{"›"}else{" "},r.name,if r.manual_only{" · explicit only"}else{""},{let lines=wrap_prose(&r.description.replace('\n'," "),inner.width.saturating_sub(4) as usize);format!("{}{}",lines.first().cloned().unwrap_or_default(),if lines.len()>1{"…"}else{""})});}if filtered.is_empty(){text+="No matching resources.\n";}text+="\n↑↓ choose · Enter prepare · F1 inspect · Esc close";(if *skills{"Skills beside 弄玉"}else{"Reusable prompts"}.into(),text,0)},
    Popup::Redirect{input,..}=>("弄玉 · change direction".into(),format!("Tell me what to change.\nPending actions will be cancelled when you send.\n\n› {input}\n\nEnter send · Esc return to the decision"),0),
    Popup::Question{question,options,input,..}=>("弄玉 · a question for you".into(),format!("{}\n\n{}\n\nOr type an answer:\n› {}",question,options.iter().enumerate().map(|(i,o)|format!("[{}] {o}",i+1)).collect::<Vec<_>>().join("\n"),input),0),
@@ -2020,12 +2075,16 @@ pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()
         app.command(&format!("/{panel}"))?;
     }
     let start = Instant::now();
-    while app.companion.is_some() {
+    loop {
         if crate::lifecycle::requested() {
             bail!("Preview interrupted");
         }
         app.tick()?;
-        if app.portrait.frame.is_some() || app.portrait.status.starts_with("Live2D unavailable") {
+        let portrait_ready = app.companion.is_none()
+            || app.portrait.frame.is_some()
+            || app.portrait.status.starts_with("Live2D unavailable");
+        let panel_ready = !matches!(&app.popup,Some(Popup::Project(nav)) if nav.busy());
+        if portrait_ready && panel_ready {
             break;
         }
         if start.elapsed() > Duration::from_secs(70) {
@@ -2222,6 +2281,27 @@ mod layout_tests {
         assert!(
             matches!(&a.popup, Some(Popup::Info { title, text, .. }) if title.starts_with("Checks beside") && text.contains("earlier result"))
         );
+    }
+    #[test]
+    fn project_picker_attaches_to_the_draft_without_submitting() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        fs::write(a.cfg.project.join("notes.txt"), "jade context\n").unwrap();
+        a.input_set("Explain this");
+        a.command("/files notes").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while matches!(&a.popup,Some(Popup::Project(nav)) if nav.busy()) {
+            assert!(Instant::now() < deadline);
+            a.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        a.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(a.input, "Explain this @{notes.txt:1-80} ");
+        assert!(a.popup.is_none());
+        assert!(a.running.is_none());
+        assert!(a.session.messages.is_empty());
+        assert_eq!(a.session.work.model_requests, 0);
     }
     #[test]
     fn pasted_question_answer_keeps_the_composer_draft() {

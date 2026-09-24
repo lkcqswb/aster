@@ -78,6 +78,7 @@ fn glob(args: &Value) -> Result<Option<GlobMatcher>> {
     Ok(Some(
         GlobBuilder::new(pattern)
             .literal_separator(true)
+            .case_insensitive(!boolean(args, "case_sensitive", true)?)
             .build()?
             .compile_matcher(),
     ))

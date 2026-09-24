@@ -201,6 +201,8 @@ pub struct App {
     stream: String,
     running: Option<Running>,
     popup: Option<Popup>,
+    // Keep one decision alive while read-only views replace each other.
+    inspection_return: Option<Box<Popup>>,
     scroll: usize,
     selection: usize,
     show_tools: bool,
@@ -261,6 +263,7 @@ impl App {
             stream: String::new(),
             running: None,
             popup: None,
+            inspection_return: None,
             scroll: 0,
             selection: 0,
             show_tools: false,
@@ -283,18 +286,40 @@ impl App {
         self.notice = text.into();
     }
     fn info(&mut self, title: &str, text: impl Into<String>) {
-        if matches!(
-            self.popup,
-            Some(Popup::Approval(_) | Popup::Question { .. } | Popup::Redirect { .. })
-        ) {
-            self.notify("Answer or dismiss the pending decision first.");
-            return;
-        }
-        self.popup = Some(Popup::Info {
+        self.inspect(Popup::Info {
             title: title.into(),
             text: text.into(),
             scroll: 0,
         });
+    }
+    fn inspect(&mut self, popup: Popup) {
+        if matches!(
+            self.popup,
+            Some(
+                Popup::Approval(_)
+                    | Popup::Question { .. }
+                    | Popup::Redirect { .. }
+                    | Popup::Delete
+            )
+        ) {
+            self.inspection_return = self.popup.take().map(Box::new);
+        }
+        self.popup = Some(popup);
+        self.last_image = None;
+    }
+    fn clear_decision(&mut self) {
+        fn clear(popup: Option<Popup>) -> Option<Popup> {
+            match popup {
+                Some(Popup::Approval(_) | Popup::Question { .. }) => None,
+                Some(Popup::Redirect { input, previous }) => Some(Popup::Redirect {
+                    input,
+                    previous: clear(previous.map(|p| *p)).map(Box::new),
+                }),
+                other => other,
+            }
+        }
+        self.popup = clear(self.popup.take());
+        self.inspection_return = clear(self.inspection_return.take().map(|p| *p)).map(Box::new);
         self.last_image = None;
     }
     fn persist(&self) -> Result<()> {
@@ -399,7 +424,7 @@ impl App {
    "/next"=>self.run_next()?,
    "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
    "/work"=>self.show_work(),
-   "/files"|"/find"=>{if matches!(self.popup,Some(Popup::Approval(_)|Popup::Question{..}|Popup::Redirect{..})){self.notify("Answer or dismiss the pending decision first.");}else{self.popup=Some(Popup::Project(Box::new(crate::navigator::Navigator::new(self.cfg.project.clone(),if cmd=="/files"{crate::navigator::Mode::Files}else{crate::navigator::Mode::Search},arg.into()))));}},
+   "/files"|"/find"=>self.inspect(Popup::Project(Box::new(crate::navigator::Navigator::new(self.cfg.project.clone(),if cmd=="/files"{crate::navigator::Mode::Files}else{crate::navigator::Mode::Search},arg.into())))),
    "/checks"=>self.info("Checks beside 弄玉",self.session.work.checks_summary()),
    "/run"=>{if arg.is_empty(){bail!("Use /run followed by a shell command")};self.submit(format!("/run {arg}"))?;},
    "/output"=>self.info("Command output · 弄玉",self.session.work.command.as_ref().map(|c|c.summary()).unwrap_or_else(||"No command has run in this turn.\nCommand output appears here while it runs.\nF4 opens this view.".into())),
@@ -552,13 +577,6 @@ impl App {
         self.persist()
     }
     fn show_resources(&mut self, skills: bool) {
-        if matches!(
-            self.popup,
-            Some(Popup::Approval(_) | Popup::Question { .. } | Popup::Redirect { .. })
-        ) {
-            self.notify("Finish the pending decision first, or use Ctrl+G to redirect.");
-            return;
-        }
         let catalog = crate::context::discover(&self.cfg.project);
         let items = if skills {
             &catalog.skills
@@ -582,7 +600,7 @@ impl App {
                 catalog.warnings.len()
             ));
         }
-        self.popup = Some(Popup::Resources {
+        self.inspect(Popup::Resources {
             items: items.clone(),
             skills,
             query: String::new(),
@@ -701,16 +719,7 @@ impl App {
         for event in events {
             match event {
                 Event::DecisionClosed => {
-                    if let Some(Popup::Redirect { previous, .. }) = &mut self.popup {
-                        *previous = None;
-                    }
-                    if matches!(
-                        self.popup,
-                        Some(Popup::Approval(_) | Popup::Question { .. })
-                    ) {
-                        self.popup = None;
-                        self.last_image = None;
-                    }
+                    self.clear_decision();
                 }
                 Event::InputConsumed(id) => {
                     self.session.pending.retain(|m| m.id != id);
@@ -744,6 +753,7 @@ impl App {
                     options,
                     answer,
                 } => {
+                    self.clear_decision();
                     self.state = "waiting".into();
                     self.popup = Some(Popup::Question {
                         question,
@@ -771,6 +781,7 @@ impl App {
                     preview,
                     answer,
                 } => {
+                    self.clear_decision();
                     self.state = "waiting".into();
                     self.popup = Some(Popup::Approval(Approval {
                         tool,
@@ -815,12 +826,7 @@ impl App {
                     self.running = None;
                     self.stream.clear();
                     self.state = "idle".into();
-                    if matches!(
-                        self.popup,
-                        Some(Popup::Approval(_) | Popup::Question { .. })
-                    ) {
-                        self.popup = None
-                    }
+                    self.clear_decision();
                     self.persist()?;
                     if self.quit_started.is_some() {
                         self.quit = true;
@@ -847,7 +853,9 @@ impl App {
             self.persist()?;
             self.quit = true;
         }
-        let state = if !self.session.work.waiting.is_empty() && self.running.is_some() {
+        let state = if self.inspection_return.is_some() {
+            "reading"
+        } else if !self.session.work.waiting.is_empty() && self.running.is_some() {
             "waiting"
         } else if self.running.is_some() {
             if self.state == "working" && self.session.work.activity == "Checking the result" {
@@ -880,6 +888,14 @@ impl App {
         Ok(())
     }
     fn key(&mut self, key: KeyEvent) -> Result<()> {
+        let result = self.key_inner(key);
+        if self.popup.is_none() && self.inspection_return.is_some() {
+            self.popup = self.inspection_return.take().map(|p| *p);
+            self.last_image = None;
+        }
+        result
+    }
+    fn key_inner(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind == KeyEventKind::Release {
             return Ok(());
         }
@@ -892,9 +908,20 @@ impl App {
             && self.running.is_some()
             && !matches!(self.popup, Some(Popup::Redirect { .. }))
         {
+            if matches!(
+                self.inspection_return.as_deref(),
+                Some(Popup::Redirect { .. })
+            ) {
+                self.popup = self.inspection_return.take().map(|p| *p);
+                return Ok(());
+            }
+            let previous = self
+                .inspection_return
+                .take()
+                .or_else(|| self.popup.take().map(Box::new));
             self.popup = Some(Popup::Redirect {
                 input: String::new(),
-                previous: self.popup.take().map(Box::new),
+                previous,
             });
             return Ok(());
         }
@@ -1510,6 +1537,7 @@ impl App {
             Self::draw_popup(
                 f,
                 popup,
+                self.inspection_return.is_some(),
                 if side_by_side {
                     Rect::new(
                         chat.x,
@@ -1622,7 +1650,9 @@ impl App {
             Paragraph::new("弄玉").style(style(FG).add_modifier(Modifier::BOLD)),
             Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), 1),
         );
-        let state = if self.running.is_some() && !self.session.work.waiting.is_empty() {
+        let state = if self.inspection_return.is_some() {
+            "reviewing before your decision"
+        } else if self.running.is_some() && !self.session.work.waiting.is_empty() {
             "your decision"
         } else if self.running.is_some() {
             self.session.work.activity.as_str()
@@ -1801,7 +1831,7 @@ impl App {
             ),
         );
     }
-    fn draw_popup(f: &mut Frame, p: &Popup, area: Rect) {
+    fn draw_popup(f: &mut Frame, p: &Popup, returning: bool, area: Rect) {
         let width = area.width.saturating_sub(4).min(88);
         let desired_height = if let Popup::Resources { items, .. } = p {
             11 + 3 * items.len().min(5) as u16
@@ -1853,15 +1883,23 @@ impl App {
                 inner.height.saturating_sub(3),
             ),
         );
+        if returning {
+            f.render_widget(
+                Paragraph::new("Decision still waiting · Esc back · Ctrl+G redirect")
+                    .style(style(GOLD)),
+                Rect::new(inner.x, inner.bottom(), inner.width, 1),
+            );
+        }
         if matches!(p, Popup::Approval(_)) {
             f.render_widget(
-                Paragraph::new("y allow · n deny · Ctrl+G redirect · ↑↓ review").style(style(GOLD)),
+                Paragraph::new("y allow · n deny · F2 plan · F6 files · Ctrl+G redirect")
+                    .style(style(GOLD)),
                 Rect::new(inner.x, inner.bottom(), inner.width, 1),
             );
         }
         if matches!(p, Popup::Question { .. }) {
             f.render_widget(
-                Paragraph::new("1–5 choose · Enter send · Ctrl+G redirect · Esc dismiss")
+                Paragraph::new("1–5 choose · Enter send · F6 files · Esc dismiss")
                     .style(style(GOLD)),
                 Rect::new(inner.x, inner.bottom(), inner.width, 1),
             );
@@ -2283,6 +2321,111 @@ mod layout_tests {
         );
     }
     #[test]
+    fn inspecting_keeps_approval_and_question_channels_open() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.input_set("Keep my draft");
+        let (answer, rx) = crossbeam_channel::bounded(1);
+        a.popup = Some(Popup::Approval(Approval {
+            tool: "edit_file".into(),
+            preview: "original diff".into(),
+            scroll: 5,
+            answer,
+        }));
+        for function in [2, 3, 4, 5, 6, 2] {
+            a.key(KeyEvent::new(KeyCode::F(function), KeyModifiers::NONE))
+                .unwrap();
+            assert!(matches!(
+                rx.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                a.inspection_return.as_deref(),
+                Some(Popup::Approval(_))
+            ));
+        }
+        // Approval keys belong only to the visible approval, never an inspection.
+        a.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(&a.popup,Some(Popup::Approval(v)) if v.scroll == 5 && v.preview == "original diff")
+        );
+        a.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!rx.recv().unwrap());
+        assert!(a.popup.is_none());
+        let (answer, rx) = crossbeam_channel::bounded(1);
+        a.popup = Some(Popup::Question {
+            question: "Language?".into(),
+            options: vec![],
+            input: "中".into(),
+            answer,
+        });
+        a.command("/checks").unwrap();
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        a.paste("文");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(rx.recv().unwrap(), "中文");
+        assert_eq!(a.input, "Keep my draft");
+    }
+    #[test]
+    fn closed_decisions_cannot_return_from_an_inspection_or_redirect() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        let (answer, rx) = crossbeam_channel::bounded(1);
+        a.popup = Some(Popup::Redirect {
+            input: "New direction".into(),
+            previous: Some(Box::new(Popup::Approval(Approval {
+                tool: "write_file".into(),
+                preview: "obsolete diff".into(),
+                scroll: 0,
+                answer,
+            }))),
+        });
+        a.show_work();
+        a.clear_decision();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Disconnected)
+        ));
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(&a.popup,Some(Popup::Redirect{input,previous}) if input=="New direction" && previous.is_none())
+        );
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(a.popup.is_none());
+        assert!(a.inspection_return.is_none());
+    }
+    #[test]
+    fn cancelling_while_inspecting_drops_the_pending_write() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.submit("steering demo".into()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(a.popup, Some(Popup::Approval(_))) {
+            assert!(Instant::now() < deadline);
+            a.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        a.show_work();
+        a.stop();
+        finish(&mut a);
+        assert_eq!(a.session.status, "stopped");
+        assert!(a.inspection_return.is_none());
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(a.popup.is_none());
+        assert!(!d.path().join("stale.json").exists());
+    }
+    #[test]
     fn project_picker_attaches_to_the_draft_without_submitting() {
         let d = tempfile::tempdir().unwrap();
         let mut a = app(d.path());
@@ -2334,6 +2477,10 @@ mod layout_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let redirect = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        a.command("/files").unwrap();
+        a.key(redirect).unwrap();
+        a.show_work();
+        // Ctrl+G restores an existing redirect draft, without nesting decisions.
         a.key(redirect).unwrap();
         a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();

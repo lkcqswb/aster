@@ -1,3 +1,9 @@
+# Decision inspection 0.12 — 2026-09-24
+
+- Rust: **65 tests passed**; formatting, strict Clippy and release build passed. Tests keep question/approval channels open across view switches, reject approval keystrokes in an inspection, preserve draft answers, and remove pending decisions on cancellation or redirection.
+- The actual animated terminal inspected files during a question, attached a source range without answering, reviewed every panel during approval, then completed a real write/edit/check. A second run changed the target externally while the edit approval was being inspected: accepting that old approval left the newer bytes intact and the final check failed honestly. **93 distinct frames**, zero API calls, exit 0. Evidence: `.aster/qa/decision-review-e2e.json`.
+- The general terminal flow passed: slash commands, AGENTS.md, approvals, independent file check, session fork/resume/export, resizing and clean exit. The first new driver attempt matched an old question in the transcript; it was corrected to wait for the actual decision heading and controls before answering.
+
 # Companion project picker 0.11 — 2026-09-24
 
 - **62 Rust tests passed**, plus formatting, Clippy with warnings denied and release build. New cases cover replacing an in-flight query, case-insensitive filename filtering, result/source pagination in both directions, large-file preview ranges, and attaching to an existing draft without submitting it.

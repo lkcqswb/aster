@@ -56,4 +56,8 @@ Project-aware file listing and search with ignore rules, scopes, globs, case con
 
 A local, asynchronous file/search picker beside the companion, numbered source previews, result/source pagination and validated references added to the existing draft. The reading pose follows the open preview; browsing does not start a model request or replace task evidence. Selected context can come from source files up to 2 MB while excerpt limits remain bounded.
 
+## Delivered in 0.12
+
+Plans, diffs, command output, checks and files remain available while a decision is pending. The companion reads with you; the pending decision remains visible in her work card. Closing inspection restores the original answer draft or approval, while cancellation and redirection remove obsolete decisions. File attachments go into the composer without answering or submitting. A newer external file edit still invalidates the prepared approval.
+
 Next: make the companion's task controls easier to discover and strengthen long-running conversation management.

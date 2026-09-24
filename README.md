@@ -81,7 +81,15 @@ The local renderer makes at most one automatic retry after a startup failure. Mi
 
 ## Conversations and commands
 
-Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` opens the session picker. `Esc` closes a panel or stops the current turn. `Ctrl+J` adds a line; Enter sends. Page Up/Down scroll the conversation. `Ctrl+T` expands tool details. `Ctrl+C` saves and exits.
+Type `/` for a searchable command menu; ↑↓ choose, Tab completes, Enter chooses and Esc closes it. `Ctrl+P` opens your conversations in this project. Enter sends, `Ctrl+J`, `Shift+Enter` or a trailing `\` adds a line, and `Ctrl+C` saves and exits (with a draft, the first press clears it).
+
+**Writing.** ↑/↓ move between the lines of a longer draft. From the first or last line they walk through your earlier requests in this project, and ↓ past the newest brings back the unsent draft. `Alt/Ctrl+←→` or `Alt+B/F` (Option-arrows on macOS) move by word, and Home/End go to the start/end of the line; press them again for the whole draft. `Ctrl+W` or `Alt+Backspace` deletes a word, and `Ctrl+U`/`Ctrl+K` delete to the start/end of the line. One Esc warns and a second Esc clears the draft; ↑ brings it back.
+
+**Reading.** PageUp/PageDown move by a page, `Shift+↑↓` or the mouse wheel move three lines, and `Ctrl+Home` goes to the first message. Scrolling stops at both ends. While you read earlier messages, new replies do not move the view; a marker shows how many newer lines wait below. `Ctrl+End` or Esc returns to the latest. `Ctrl+O` (or `Ctrl+T`) expands tool details.
+
+**Conversations.** In `Ctrl+P` / `/sessions`, typing filters by title, ID or your first requests. Each row shows when it was last active, its message count and model, with `● current` on the open one. Enter opens the highlighted conversation, which starts on the most recent *other* one. `Ctrl+N` starts a new conversation and `Ctrl+D` then `y` deletes the highlighted one (never the open one; use `/delete` for that). Opening a conversation saves the current one first. Every list panel uses ↑↓, PgUp/PgDn and Home/End.
+
+The footer shows short hints, the context meter and the session's input/output tokens. Notices fade after a few seconds.
 
 | Command | What it does |
 | --- | --- |
@@ -89,7 +97,9 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/sessions`, `/resume ID` | Find and continue a project session |
 | `/rename TITLE` | Rename the current conversation |
 | `/fork [title]` | Branch its model context and transcript |
-| `/compact [note]` | Archive full context; keep bounded recent exchanges and task excerpts |
+| `/compact [note]` | Archive full context; 弄玉 summarizes older exchanges, recent ones stay intact |
+| `/compact local [note]`, `/compact auto on\|off` | Local excerpts with no request; turn auto-compact on or off |
+| `/limits` | Show the turn limits and context window in effect |
 | `/checkpoint` | Inspect retained context, byte counts and the restore ID |
 | `/restore ID` | Restore archived provider context as a new conversation; files stay shared |
 | `/export` | Export a readable Markdown transcript |
@@ -129,7 +139,9 @@ The queue is saved with the conversation (up to eight messages / 32 KB). A norma
 
 On Unix, terminal hangup and termination signals request a saved, orderly shutdown. Active commands are cancelled with their background children; the private renderer and its profile are removed. An interrupted provider request may still consume tokens. A forced process kill cannot run cleanup or save new state.
 
-Forks share the project filesystem. They do not roll back files. Compaction is deterministic local context reduction, not an LLM-generated summary; the full earlier session is archived privately before reduction.
+Forks share the project filesystem. They do not roll back files.
+
+**Auto-compact.** The footer's `ctx` meter estimates how full the model's context window is. Before a request would cross 80% of it, Aster archives the full conversation privately and replaces older exchanges with a summary that 弄玉 writes in one bounded, tool-free request. Recent exchanges stay intact. If the summary request fails, Aster uses local excerpts instead and says so; it never retries automatically. `/checkpoint` shows the summary and `/restore ID` brings back the archived context as a new conversation. [Context and compaction](docs/CONTEXT.md#context-size-auto-compact-and-checkpoints) has the details.
 
 Sessions live in `~/.local/share/aster`, with private files, atomic writes and an exclusive store lock. Use `--state-dir` for a separate store. Session listing is scoped to the project. No API key is stored in session files. Exports omit private provider content such as thinking blocks.
 
@@ -161,7 +173,7 @@ chmod 600 .env
 
 Aster reads only the named MiniMax settings from this file; environment variables take precedence. The default model is `MiniMax-M2.7`, via MiniMax's Anthropic-compatible endpoint. Responses stream into the conversation, including streamed tool arguments. Full assistant blocks are retained privately for provider-compatible continuation. Provider redirects are rejected.
 
-Each user turn permits at most 12 model requests, 24 tool calls, 180 active seconds, 2,048 output tokens per request and 12,000 output tokens overall. Question and approval waits pause the active timer, with a 15-minute maximum per decision. Unexecuted or declined checks are not recorded as failed tests. These are work limits, not a currency cap; input tokens also incur usage. Errors and truncated streams stop without automatic retries. A submitted request may finish and consume tokens after local cancellation.
+By default each user turn permits at most 40 model requests, 120 tool calls, 900 active seconds (15 minutes), 8,192 output tokens per request and 64,000 output tokens overall. Shell commands may run up to 600 seconds each, within the turn's remaining time. Change these when starting Aster, for example `aster --max-requests 60 --turn-seconds 1800`, or with `ASTER_MAX_REQUESTS`, `ASTER_MAX_TOOLS`, `ASTER_TURN_SECONDS`, `ASTER_MAX_OUTPUT_TOKENS`, `ASTER_TURN_OUTPUT_TOKENS`, `ASTER_CONTEXT_WINDOW` and `ASTER_AUTO_COMPACT`. `/limits` shows the values in effect. Reaching a limit stops the turn with a message; send a new message to continue. Question and approval waits pause the active timer, with a 15-minute maximum per decision. Unexecuted or declined checks are not recorded as failed tests. These are work limits, not a currency cap; input tokens also incur usage. Errors and truncated streams stop without automatic retries. A submitted request may finish and consume tokens after local cancellation.
 
 For command-line use without the TUI:
 

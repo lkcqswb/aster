@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod agent;
 pub mod compaction;
+pub mod composer;
 pub mod config;
 pub mod context;
 pub mod edits;

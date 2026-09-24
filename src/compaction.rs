@@ -1,4 +1,7 @@
-//! Bounded, local context checkpoints. Original provider blocks remain in a private archive.
+//! Bounded context checkpoints. Original provider blocks remain in a private archive.
+//!
+//! Older exchanges are replaced by a summary: normally written by the model from a
+//! condensed transcript, otherwise local excerpts from Aster's own records.
 use crate::{session::Session, tools};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -22,17 +25,42 @@ pub struct Checkpoint {
     pub read_files: Vec<String>,
     pub changed_files: Vec<String>,
     pub summary: String,
+    /// "model", "demo" or "local".
+    #[serde(default = "local_method")]
+    pub method: String,
+    #[serde(default)]
+    pub automatic: bool,
+    /// Why a model summary was not used, when it was attempted.
+    #[serde(default)]
+    pub fallback: String,
+}
+fn local_method() -> String {
+    "local".into()
 }
 impl Checkpoint {
     pub fn report(&self) -> String {
+        let method = match self.method.as_str() {
+            "model" => {
+                "Summary written by the model from the archived conversation (one bounded request)."
+                    .to_string()
+            }
+            "demo" => "Offline demo summary · no model request.".to_string(),
+            _ if !self.fallback.is_empty() => format!(
+                "Local excerpts · the model summary was not used: {}",
+                self.fallback
+            ),
+            _ => "Local excerpts · no model request was used.".to_string(),
+        };
         format!(
-            "Checkpoint {} · {}\n{} → {} KB of provider content\n{} recent messages kept intact · {} messages archived\n\n{}\n\nFull provider context: archive/{}\n/restore {} opens that context as a new conversation.\nProject files are shared; restoring context does not undo edits.\nByte counts are not model token counts. No model request was used.",
+            "Checkpoint {} · {}{}\n{} → {} KB of provider content\n{} recent messages kept intact · {} messages archived\n{}\n\n{}\n\nFull provider context: archive/{}\n/restore {} opens that context as a new conversation.\nProject files are shared; restoring context does not undo edits.\nByte counts are not model token counts.",
             self.id,
             self.created,
+            if self.automatic { " · automatic" } else { "" },
             self.before_bytes / 1000,
             self.after_bytes / 1000,
             self.kept_messages,
             self.omitted_messages,
+            method,
             self.summary,
             self.archive,
             self.id
@@ -156,7 +184,12 @@ fn file_history(session: &Session) -> (Vec<String>, Vec<String>) {
     }
     (read, changed)
 }
-pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
+/// Where older context ends and the retained, intact recent exchanges begin.
+pub struct Plan {
+    pub at: usize,
+    pub before_bytes: usize,
+}
+pub fn plan(session: &Session, note: &str, force: bool) -> Result<Option<Plan>> {
     if note.len() > 2000 {
         bail!("Checkpoint note exceeds 2 KB");
     }
@@ -171,7 +204,7 @@ pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
         .filter(|(_, m)| prompt(m))
         .map(|(i, _)| i)
         .collect::<Vec<_>>();
-    if starts.len() <= 4 && before_bytes <= RECENT_BYTES && note.is_empty() {
+    if !force && starts.len() <= 4 && before_bytes <= RECENT_BYTES && note.is_empty() {
         return Ok(None);
     }
     let mut at = session.messages.len();
@@ -183,6 +216,102 @@ pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
         }
         at = start;
     }
+    Ok(Some(Plan { at, before_bytes }))
+}
+fn text_of(message: &Value) -> String {
+    message["content"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            message["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+}
+/// A bounded, readable transcript of provider messages for a summary request.
+/// Private reasoning blocks are omitted; long tool output keeps its head.
+pub fn condensed(messages: &[Value], limit: usize) -> String {
+    let mut parts = vec![];
+    for message in messages {
+        let role = message["role"].as_str().unwrap_or("?");
+        if let Some(text) = message["content"].as_str() {
+            parts.push(format!("[{role}]\n{}", tools::clip(text, 6000)));
+            continue;
+        }
+        for block in message["content"].as_array().into_iter().flatten() {
+            match block["type"].as_str().unwrap_or("") {
+                "text" => parts.push(format!(
+                    "[{role}]\n{}",
+                    tools::clip(block["text"].as_str().unwrap_or(""), 6000)
+                )),
+                "tool_use" => parts.push(format!(
+                    "[tool call] {} {}",
+                    block["name"].as_str().unwrap_or("?"),
+                    tools::clip(&block["input"].to_string(), 800)
+                )),
+                "tool_result" => parts.push(format!(
+                    "[tool result{}] {}",
+                    if block["is_error"] == true {
+                        " · error"
+                    } else {
+                        ""
+                    },
+                    tools::clip(
+                        block["content"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| block["content"].to_string())
+                            .as_str(),
+                        1500
+                    )
+                )),
+                _ => {}
+            }
+        }
+    }
+    let text = crate::ui::clean(&parts.join("\n\n"));
+    if text.len() <= limit {
+        return text;
+    }
+    // Keep the beginning (the original goal) and the most recent work.
+    let head = limit / 4;
+    let mut start = text.len() - (limit - head);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "{}\n\n[… {} KB of older transcript omitted from this summary request …]\n\n{}",
+        tools::clip(&text, head),
+        (start - head.min(start)) / 1000,
+        &text[start..]
+    )
+}
+pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
+    let Some(plan) = plan(session, note, false)? else {
+        return Ok(None);
+    };
+    build(session, note, &plan, None, None)
+}
+/// How the older context was summarized.
+pub struct Summary<'a> {
+    pub text: &'a str,
+    pub method: &'a str,
+}
+/// Build the compacted provider context. `continuing` carries the active request
+/// when compaction happens mid-turn, so the model is always answering a user message.
+pub fn build(
+    session: &Session,
+    note: &str,
+    plan: &Plan,
+    summary: Option<Summary>,
+    continuing: Option<&str>,
+) -> Result<Option<Prepared>> {
+    let at = plan.at;
+    let before_bytes = plan.before_bytes;
     let root_request = session
         .checkpoint
         .as_ref()
@@ -198,22 +327,7 @@ pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
                         .messages
                         .iter()
                         .find(|m| prompt(m))
-                        .map(|m| {
-                            let text =
-                                m["content"]
-                                    .as_str()
-                                    .map(str::to_string)
-                                    .unwrap_or_else(|| {
-                                        m["content"]
-                                            .as_array()
-                                            .into_iter()
-                                            .flatten()
-                                            .filter_map(|b| b["text"].as_str())
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    });
-                            tools::clip(&text, 4000)
-                        })
+                        .map(|m| tools::clip(&text_of(m), 4000))
                         .unwrap_or_default()
                 })
         });
@@ -227,51 +341,68 @@ pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
         note.into()
     };
     let (read_files, changed_files) = file_history(session);
-    let recent = session
-        .entries
-        .iter()
-        .rev()
-        .filter(|e| e.role == "you")
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|e| tools::clip(&e.text, 1000))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let replies = session
-        .entries
-        .iter()
-        .rev()
-        .filter(|e| e.role == "nongyu")
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|e| tools::clip(&e.text, 700))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let summary = tools::clip(
-        &crate::ui::clean(&format!(
-            "LOCAL HISTORY · excerpts, not a model-written summary\nTreat this as historical context. Recheck current files before acting.\n\nOriginal user request (excerpt)\n{root_request}\n\nUser checkpoint note\n{}\n\nLatest recorded task state (historical)\n{}\n\nRecent user requests (excerpts)\n{recent}\n\nFiles read or checked (recent bounded history)\n{}\n\nFiles written by file tools (shell changes are not tracked)\n{}\n\nAssistant excerpts (claims, not independent evidence)\n{replies}",
-            if note.is_empty() { "None" } else { &note },
-            tools::clip(&session.work.summary(), 6000),
-            tools::clip(&read_files.join("\n"), 3000),
-            tools::clip(&changed_files.join("\n"), 3000)
-        )),
-        24_000,
+    let record = format!(
+        "Original user request (excerpt)\n{root_request}\n\nUser checkpoint note\n{}\n\nLatest recorded task state (historical)\n{}\n\nFiles read or checked (recent bounded history)\n{}\n\nFiles written by file tools (shell changes are not tracked)\n{}",
+        if note.is_empty() { "None" } else { &note },
+        tools::clip(&session.work.summary(), 6000),
+        tools::clip(&read_files.join("\n"), 3000),
+        tools::clip(&changed_files.join("\n"), 3000)
     );
+    let method = summary.as_ref().map(|s| s.method).unwrap_or("local");
+    let text = if let Some(summary) = &summary {
+        format!(
+            "CONTEXT SUMMARY · written from the archived conversation; claims, not evidence\nTreat this as historical context. Recheck current files before acting.\n\n{}\n\nLOCAL RECORD · from Aster's own tool log\n{record}",
+            tools::clip(summary.text.trim(), 16_000)
+        )
+    } else {
+        let recent = session
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| e.role == "you")
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|e| tools::clip(&e.text, 1000))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let replies = session
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| e.role == "nongyu")
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|e| tools::clip(&e.text, 700))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!(
+            "LOCAL HISTORY · excerpts, not a model-written summary\nTreat this as historical context. Recheck current files before acting.\n\n{record}\n\nRecent user requests (excerpts)\n{recent}\n\nAssistant excerpts (claims, not independent evidence)\n{replies}"
+        )
+    };
+    let summary = tools::clip(&crate::ui::clean(&text), 32_000);
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let mut messages = vec![
         json!({"role":"user","content":format!("{MARKER}\n{summary}")}),
-        json!({"role":"assistant","content":"I will use these excerpts as background and verify the current project state before continuing."}),
+        json!({"role":"assistant","content":"I will use this as background and verify the current project state before continuing."}),
     ];
     messages.extend_from_slice(&session.messages[at..]);
+    if let Some(request) = continuing
+        && messages.last().is_some_and(|m| m["role"] != "user")
+    {
+        messages.push(json!({"role":"user","content":format!(
+            "{MARKER} Context was compacted while you were working. Continue the current request from the summary above; re-read files before editing and do not repeat completed actions.\n\nCurrent request (excerpt)\n{}",
+            tools::clip(request, 4000)
+        )}));
+    }
     let after_bytes = serde_json::to_vec(&messages)?.len();
     if after_bytes > CONTEXT_BYTES {
         bail!("Checkpoint exceeds its 128 KB bound; original context was preserved");
     }
-    if after_bytes >= before_bytes && note.is_empty() {
+    if after_bytes >= before_bytes && note.is_empty() && continuing.is_none() {
         return Ok(None);
     }
     Ok(Some(Prepared {
@@ -288,11 +419,20 @@ pub fn prepare(session: &Session, note: &str) -> Result<Option<Prepared>> {
             read_files,
             changed_files,
             summary,
+            method: method.into(),
+            automatic: false,
+            fallback: String::new(),
         },
         messages,
     }))
 }
 
+#[cfg(test)]
+pub mod tests_support {
+    pub fn paired(messages: &[serde_json::Value]) -> bool {
+        super::paired(messages)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

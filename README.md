@@ -36,7 +36,7 @@ Put that function in `~/.zshrc`, then run `source ~/.zshrc` once. No Python runt
 
 ## Meet 弄玉
 
-The companion pane is part of the terminal layout, not a separate window. iTerm2 uses inline PNG frames; Ghostty and Kitty use the Kitty graphics protocol. Aster detects these terminals and has an animated character-cell fallback. Select a protocol explicitly with `--graphics iterm`, `--graphics kitty`, or `--graphics halfblocks`.
+The companion pane is part of the terminal layout, not a separate window. iTerm2 receives inline JPEG frames; Ghostty and Kitty receive PNG frames through the Kitty graphics protocol, replaced in place under one image id. Aster detects these terminals and has an animated character-cell fallback that draws each cell as a two-colour quadrant block (four pixels per cell). Select a protocol explicitly with `--graphics iterm`, `--graphics kitty`, or `--graphics halfblocks`.
 
 - Start typing: she becomes attentive.
 - Send a message: she thinks while waiting, works during tools, and speaks during streamed text.
@@ -52,7 +52,7 @@ Her work card tracks the active plan step, file or command, pending decision, an
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
 
-Speaking motion follows text activity. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
+Her motion is procedural and eased: every state change moves her toward a new pose instead of snapping, with randomized blinks, small eye saccades, a head that follows her gaze, and slow breathing and sway. Speaking motion follows the rate of streamed reply text: syllable-like mouth pulses while text arrives, closing shortly after it stops. This version does not synthesize speech or claim audio lip sync. If the model declares expressions or motions, a matching mood expression, a tap motion and occasional idle motions blend with that procedural layer. The companion is a fictional AI character.
 
 By default Aster reads existing assets here:
 
@@ -69,9 +69,9 @@ By default Aster reads existing assets here:
     弄玉.4096/texture_*.png
 ```
 
-Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address.
+Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address. Pose, user data, expression and motion JSON files referenced by the model3.json are included in that allowlist when present.
 
-A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at up to 8 fps. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
+A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at about 15 fps, rendered at the portrait's pixel size and spaced further apart when the renderer needs more time per frame. Taller portrait panes show more of her, up to about half her body; wider panes keep a bust. `/status` reports the measured frame rate. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
 
 Startup diagnostics are saved privately in `~/.local/share/aster/diagnostics/live2d.json` (or under your selected `--state-dir`). This is a record of the latest startup or error transition, not a continuously updated frame counter. It contains no conversation or provider key. Renderer traffic stays on loopback and bypasses proxy settings. Browser stderr is retained only in its temporary profile, with a bounded excerpt included when startup fails.
 

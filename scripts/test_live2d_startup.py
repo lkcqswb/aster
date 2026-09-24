@@ -13,6 +13,7 @@ import time
 
 import pexpect
 import pyte
+from terminal_helpers import screen_text, stop_child
 
 ROOT = Path(__file__).resolve().parents[1]
 CHROME = os.environ.get("ASTER_CHROME", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -69,10 +70,10 @@ def main():
                 pump()
                 if predicate():
                     return
-            raise AssertionError("Timed out:\n" + "\n".join(screen.display))
+            raise AssertionError("Timed out:\n" + screen_text(screen))
 
         try:
-            wait(lambda: "/pet retry" in "\n".join(screen.display))
+            wait(lambda: "/pet retry" in screen_text(screen))
             wait(lambda: "simulated renderer startup failure" in (state / "diagnostics/live2d.json").read_text())
             failure = json.loads((state / "diagnostics/live2d.json").read_text())
             assert "simulated renderer startup failure" in failure["status"], failure

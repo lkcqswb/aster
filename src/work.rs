@@ -80,7 +80,10 @@ impl Work {
                     .push((subject.into(), crate::tools::clip(diff, 12000)));
             }
         }
-        if matches!(name, "check_file" | "shell") && (error || result["passed"].is_boolean()) {
+        if matches!(name, "check_file" | "shell")
+            && result["executed"] != false
+            && (error || result["passed"].is_boolean())
+        {
             let passed = !error && result["passed"].as_bool().unwrap_or(false);
             self.evidence.push(Evidence {
                 label: format!("{name} · {}", crate::tools::clip(subject, 180)),
@@ -154,5 +157,24 @@ mod tests {
         );
         assert_eq!(w.verdict(), "Checks need attention");
         assert_eq!(Work::begin("next").verdict(), "No checks recorded");
+    }
+    #[test]
+    fn unexecuted_checks_are_not_failed_tests() {
+        let mut w = Work::begin("test");
+        w.record(
+            "shell",
+            &json!({"command":"cargo test"}),
+            &json!({"error":"declined","executed":false}),
+            true,
+        );
+        assert!(w.evidence.is_empty());
+        w.record(
+            "check_file",
+            &json!({"path":"bad.json"}),
+            &json!({"error":"invalid json","executed":true}),
+            true,
+        );
+        assert_eq!(w.evidence.len(), 1);
+        assert!(!w.evidence[0].passed);
     }
 }

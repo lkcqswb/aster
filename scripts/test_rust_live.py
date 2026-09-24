@@ -7,6 +7,7 @@ import tempfile
 import time
 import pexpect
 import pyte
+from terminal_helpers import screen_text, stop_child
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = {'language':'Rust','companion':'弄玉','proof':'jade-486'}
@@ -27,12 +28,12 @@ def main():
             try:stream.feed(child.read_nonblocking(65536,timeout=.1))
             except pexpect.TIMEOUT:pass
             except pexpect.EOF:raise AssertionError('Aster exited unexpectedly')
-            return '\n'.join(screen.display)
+            return screen_text(screen)
         def wait(needle,timeout=15):
             end=time.monotonic()+timeout
             while time.monotonic()<end:
                 if needle in pump():return
-            raise AssertionError('Missing '+needle+'\n'+'\n'.join(screen.display))
+            raise AssertionError('Missing '+needle+'\n'+screen_text(screen))
         try:
             wait('aster')
             prompt='Read AGENTS.md. Create result.json with exactly '+json.dumps(EXPECTED,ensure_ascii=False)+'. Use write_file and then check_file with json_equals to verify the saved file against that exact object. Do not use shell commands. Reply briefly.'

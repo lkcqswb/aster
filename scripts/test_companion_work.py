@@ -8,6 +8,7 @@ import tempfile
 import time
 import pexpect
 import pyte
+from terminal_helpers import screen_text, stop_child
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -22,12 +23,12 @@ def main():
         def pump():
             nonlocal buffer
             try:chunk=child.read_nonblocking(524288,timeout=.1)
-            except pexpect.TIMEOUT:return '\n'.join(screen.display)
+            except pexpect.TIMEOUT:return screen_text(screen)
             stream.feed(chunk);buffer+=chunk
             while (m:=re.search(r'\x1b\]1337;File=[^:]*:([A-Za-z0-9+/=]+)\x07',buffer)):
                 frames.add(hashlib.sha256(m[1].encode()).hexdigest());buffer=buffer[m.end():]
             assert len(buffer)<4000000
-            return '\n'.join(screen.display)
+            return screen_text(screen)
         def wait(predicate,timeout=20):
             end=time.monotonic()+timeout
             while time.monotonic()<end:
@@ -35,18 +36,18 @@ def main():
                 if predicate(text):return
             diagnostic=json.loads((state/'diagnostics/live2d.json').read_text()) if (state/'diagnostics/live2d.json').exists() else {}
             (ROOT/'.aster/qa/companion-work-failure.json').write_text(json.dumps({'frames':len(frames),'diagnostic':diagnostic,'tail':buffer[-2000:]},ensure_ascii=False,indent=2))
-            raise AssertionError(f'Timed out; distinct frames={len(frames)}, renderer={diagnostic.get("status")}\n'+'\n'.join(screen.display))
+            raise AssertionError(f'Timed out; distinct frames={len(frames)}, renderer={diagnostic.get("status")}\n'+screen_text(screen))
         def text(needle):wait(lambda t:needle in t)
         def close(needle):child.send('\x1b');wait(lambda t:needle not in t)
         def command(value,needle):child.send(value+'\r');text(needle)
         try:
             text('aster');command('/demo work','Which language')
             wait(lambda _:len(frames)>=3,135)
-            assert 'Which language' in '\n'.join(screen.display),'Question was not visible with animation'
+            assert 'Which language' in screen_text(screen),'Question was not visible with animation'
             child.send('2');text('Allow write_file?')
             assert not (project/'companion-demo.json').exists()
             count=len(frames);wait(lambda _:len(frames)>=count+2)
-            assert 'Allow write_file?' in '\n'.join(screen.display),'Approval disappeared while rendering'
+            assert 'Allow write_file?' in screen_text(screen),'Approval disappeared while rendering'
             child.send('y');text('Allow edit_file?')
             assert json.loads((project/'companion-demo.json').read_text())=={'greeting':'你好','ready':False}
             child.send('y')
@@ -78,6 +79,6 @@ def main():
             saved=preview/(sessions[0]['id']+'.json');saved.write_text(json.dumps(sessions[0],ensure_ascii=False));saved.chmod(0o600)
             print(json.dumps(evidence,ensure_ascii=False,indent=2))
         finally:
-            if child.isalive():child.terminate(force=True)
+            stop_child(child, stream)
 
 if __name__=='__main__':main()

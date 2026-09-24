@@ -3,7 +3,7 @@ use crate::{
     config::{Cli, Config},
     instructions,
     live2d::{Companion, Graphics, Shared},
-    session::{Entry, Session, Store},
+    session::{Delivery, Entry, PendingMessage, Session, Store},
     tools,
 };
 use anyhow::{Context, Result, bail};
@@ -56,6 +56,11 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/check", "Verify a file independently"),
     ("/work", "Open 弄玉's plan and task evidence"),
     ("/review", "Review the changes made this turn"),
+    ("/steer", "Give a new direction during work"),
+    ("/follow", "Queue the next task"),
+    ("/queue", "Inspect waiting messages"),
+    ("/next", "Run the next saved message"),
+    ("/drop", "Remove a waiting message by ID"),
     ("/compact", "Archive context; keep recent exchanges"),
     ("/export", "Save a readable transcript"),
     ("/tools", "Expand or collapse tool details"),
@@ -144,6 +149,10 @@ struct Approval {
     answer: crossbeam_channel::Sender<bool>,
 }
 enum Popup {
+    Redirect {
+        input: String,
+        previous: Option<Box<Popup>>,
+    },
     Question {
         question: String,
         options: Vec<String>,
@@ -257,7 +266,7 @@ impl App {
     fn info(&mut self, title: &str, text: impl Into<String>) {
         if matches!(
             self.popup,
-            Some(Popup::Approval(_) | Popup::Question { .. })
+            Some(Popup::Approval(_) | Popup::Question { .. } | Popup::Redirect { .. })
         ) {
             self.notify("Answer or dismiss the pending decision first.");
             return;
@@ -279,7 +288,8 @@ impl App {
     }
     fn paste(&mut self, text: &str) {
         let text = clean(text);
-        if let Some(Popup::Question { input, .. }) = &mut self.popup {
+        if let Some(Popup::Question { input, .. } | Popup::Redirect { input, .. }) = &mut self.popup
+        {
             if input.len() + text.len() <= 2000 {
                 input.push_str(&text);
             }
@@ -340,11 +350,20 @@ impl App {
                 | "/tools"
                 | "/work"
                 | "/review"
+                | "/steer"
+                | "/follow"
+                | "/queue"
+                | "/drop"
         ) && self.busy_guard()
         {
             return Ok(());
         }
         match cmd {
+   "/steer"=>self.enqueue(arg.into(),Delivery::Steer)?,
+   "/follow"=>self.enqueue(arg.into(),Delivery::FollowUp)?,
+   "/queue"=>{let text=if self.session.pending.is_empty(){"No messages waiting.\n\nWhile working: Enter adds a direction; Alt+Enter queues the next task.\n/steer MESSAGE · /follow MESSAGE".into()}else{format!("{}\n\n/next runs the next message when idle.\n/drop ID removes a waiting message.\nStopping preserves the queue; it does not run automatically after an error or restart.",self.session.pending.iter().map(|m|format!("{} · {}\n{}\n",m.id,if m.delivery==Delivery::Steer{"direction"}else{"next task"},m.text)).collect::<Vec<_>>().join("\n"))};self.info("Messages waiting for 弄玉",text);},
+   "/next"=>self.run_next()?,
+   "/drop"=>{let Some(index)=self.session.pending.iter().position(|m|m.id==arg)else{bail!("Use /queue to find the message ID")};let item=&self.session.pending[index];if item.delivery==Delivery::Steer&&let Some(r)=&self.running {let mut q=r.steering.lock().unwrap();let Some(at)=q.iter().position(|m|m.id==arg)else{bail!("That direction has already reached the agent")};q.remove(at);}self.session.pending.remove(index);self.persist()?;self.notify("Waiting message removed");},
    "/work"=>self.show_work(),
    "/review"=>{let text=if self.session.work.diffs.is_empty(){"No file edits recorded for this turn. Shell changes may require a git diff.\n\n/work shows the plan and actual checks.".into()}else{self.session.work.diffs.iter().map(|(_,d)|d.as_str()).collect::<Vec<_>>().join("\n\n")};self.info("Review changes · 弄玉",text);},
    "/new"|"/clear"=>self.new_session(arg)?,
@@ -365,10 +384,10 @@ impl App {
    "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
    "/pet"=>{match arg { "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, /pet off, or /pet retry") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo"}else{"demo task"}.into())?;},
-   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
+   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits: 12 requests · 24 tools · 180 active seconds\n2,048 output tokens/request · 12,000 output tokens/turn\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?)),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
-   "/help"=>self.info("Make yourself at home",format!("{}\n\nEnter sends · Ctrl+J inserts a line · Esc stops\nCtrl+P opens sessions · Ctrl+K opens commands\nPage Up/Down scroll · Ctrl+T shows tools\nCtrl+C saves and quits · click 弄玉 for a reaction\n\n/new [title] · /rename TITLE · /fork [title]\n/resume ID · /check FILE [expected JSON]\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
+   "/help"=>self.info("Make yourself at home",format!("{}\n\nEnter sends / steers · Alt+Enter queues · Ctrl+G redirects\nCtrl+J inserts a line · Esc stops\nCtrl+P opens sessions · Ctrl+K opens commands\nPage Up/Down scroll · Ctrl+T shows tools\nCtrl+C saves and quits · click 弄玉 for a reaction\n\n/new [title] · /rename TITLE · /fork [title]\n/resume ID · /check FILE [expected JSON]\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
    "/quit"|"/exit"=>self.request_quit(),
    _=>bail!("Unknown command. Type / to see available commands."),
   }
@@ -434,6 +453,56 @@ impl App {
         };
         self.info("Working together · 弄玉", text);
     }
+    fn enqueue(&mut self, text: String, delivery: Delivery) -> Result<()> {
+        if text.trim().is_empty() {
+            bail!("Add the message you want to send");
+        }
+        if self.running.is_none() {
+            return self.submit(text);
+        }
+        if self.session.pending.len() >= 8
+            || text.len()
+                + self
+                    .session
+                    .pending
+                    .iter()
+                    .map(|m| m.text.len())
+                    .sum::<usize>()
+                > 32_000
+        {
+            bail!("Queue limit: eight messages and 32 KB total. Use /queue to review it.");
+        }
+        let message = PendingMessage::new(text, delivery.clone());
+        self.session.pending.push(message.clone());
+        if let Err(e) = self.persist() {
+            self.session.pending.pop();
+            return Err(e);
+        }
+        if delivery == Delivery::Steer {
+            if let Some(r) = &self.running {
+                r.steering.lock().unwrap().push_back(message);
+            }
+            self.notify("Direction saved · read at the next tool boundary");
+        } else {
+            self.notify("Next task saved · starts after the current turn finishes");
+        }
+        Ok(())
+    }
+    fn run_next(&mut self) -> Result<()> {
+        if self.running.is_some() {
+            bail!("Work is still running; Esc stops it");
+        }
+        if self.session.pending.is_empty() {
+            self.notify("No messages waiting");
+            return Ok(());
+        }
+        let next = self.session.pending.remove(0);
+        if let Err(e) = self.submit(next.text.clone()) {
+            self.session.pending.insert(0, next);
+            return Err(e);
+        }
+        Ok(())
+    }
     fn submit(&mut self, prompt: String) -> Result<()> {
         if self.busy_guard() {
             return Ok(());
@@ -445,13 +514,15 @@ impl App {
             bail!("Message exceeds 32 KB")
         }
         let before = self.session.clone();
-        self.session.add("you", &prompt);
-        self.session
+        let mut submitted = before.clone();
+        submitted.add("you", &prompt);
+        submitted
             .messages
             .push(json!({"role":"user","content":prompt}));
-        self.session.status = "thinking".into();
-        self.session.work = crate::work::Work::begin(&prompt);
-        self.persist()?;
+        submitted.status = "thinking".into();
+        submitted.work = crate::work::Work::begin(&prompt);
+        self.store.save(&submitted)?;
+        self.session = submitted;
         self.running = Some(agent::spawn(
             before,
             prompt,
@@ -481,6 +552,7 @@ impl App {
         }
     }
     fn tick(&mut self) -> Result<()> {
+        let mut advance_queue = false;
         let events = self
             .running
             .as_ref()
@@ -488,6 +560,25 @@ impl App {
             .unwrap_or_default();
         for event in events {
             match event {
+                Event::DecisionClosed => {
+                    if let Some(Popup::Redirect { previous, .. }) = &mut self.popup {
+                        *previous = None;
+                    }
+                    if matches!(
+                        self.popup,
+                        Some(Popup::Approval(_) | Popup::Question { .. })
+                    ) {
+                        self.popup = None;
+                        self.last_image = None;
+                    }
+                }
+                Event::InputConsumed(id) => {
+                    self.session.pending.retain(|m| m.id != id);
+                    self.notify("New direction received");
+                    if let Some(c) = &self.companion {
+                        c.motion("listening", &self.mood, true, false);
+                    }
+                }
                 Event::Work(work) => self.session.work = work,
                 Event::Question {
                     question,
@@ -531,10 +622,13 @@ impl App {
                     self.last_image = None;
                 }
                 Event::Checkpoint(session) => {
+                    let pending = std::mem::take(&mut self.session.pending);
                     self.session = *session;
+                    self.session.pending = pending;
                     self.persist()?;
                 }
                 Event::Finished(session) => {
+                    advance_queue = session.status == "done";
                     let happy = session.status == "done"
                         && !session.work.evidence.is_empty()
                         && session.work.evidence.iter().all(|e| e.passed);
@@ -549,7 +643,9 @@ impl App {
                         .into(),
                         Instant::now(),
                     ));
+                    let pending = std::mem::take(&mut self.session.pending);
                     self.session = *session;
+                    self.session.pending = pending;
                     if self.session.work.evidence.iter().any(|e| !e.passed) {
                         self.notice = "A file check failed · /tools to review".into();
                         self.reaction = Some(("concerned".into(), Instant::now()));
@@ -569,6 +665,13 @@ impl App {
                     }
                 }
             }
+        }
+        if advance_queue
+            && !self.quit
+            && self.quit_started.is_none()
+            && !self.session.pending.is_empty()
+        {
+            self.run_next()?;
         }
         if self
             .quit_started
@@ -618,6 +721,17 @@ impl App {
             self.request_quit();
             return Ok(());
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('g')
+            && self.running.is_some()
+            && !matches!(self.popup, Some(Popup::Redirect { .. }))
+        {
+            self.popup = Some(Popup::Redirect {
+                input: String::new(),
+                previous: self.popup.take().map(Box::new),
+            });
+            return Ok(());
+        }
         if key.code == KeyCode::F(2) {
             self.show_work();
             return Ok(());
@@ -628,6 +742,35 @@ impl App {
         }
         if let Some(popup) = self.popup.take() {
             match popup {
+                Popup::Redirect {
+                    mut input,
+                    previous,
+                } => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.popup = previous.map(|p| *p);
+                            return Ok(());
+                        }
+                        KeyCode::Enter if !input.trim().is_empty() => {
+                            if let Err(error) = self.enqueue(input.trim().into(), Delivery::Steer) {
+                                self.popup = Some(Popup::Redirect { input, previous });
+                                return Err(error);
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && input.len() < 4000 =>
+                        {
+                            input.push(c)
+                        }
+                        KeyCode::Backspace => {
+                            input.pop();
+                        }
+                        _ => {}
+                    }
+                    self.popup = Some(Popup::Redirect { input, previous });
+                }
                 Popup::Question {
                     question,
                     options,
@@ -778,10 +921,12 @@ impl App {
             return Ok(());
         }
         match key.code {
-            KeyCode::Enter
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    || key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                let input = self.input.trim().to_string();
+                self.enqueue(input, Delivery::FollowUp)?;
+                self.input_set("");
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.input.insert(self.cursor, '\n');
                 self.cursor += 1;
             }
@@ -796,7 +941,8 @@ impl App {
                 }
                 let input = self.input.trim().to_string();
                 if self.running.is_some() && !input.starts_with('/') {
-                    self.notify("Your draft is kept. Wait for this turn, or Esc to stop it.");
+                    self.enqueue(input, Delivery::Steer)?;
+                    self.input_set("");
                     return Ok(());
                 }
                 self.input_set("");
@@ -998,7 +1144,7 @@ impl App {
         if self.input.is_empty() {
             f.render_widget(
                 Paragraph::new(if self.running.is_some() {
-                    "Esc to pause the work…"
+                    "Add a direction · Enter steer · Alt+Enter next task"
                 } else {
                     "和弄玉说说，你想做什么？"
                 })
@@ -1019,7 +1165,12 @@ impl App {
                 input_area,
             );
         }
-        let bottom = if self.notice.is_empty() {
+        let bottom = if self.notice.is_empty() && !self.session.pending.is_empty() {
+            format!(
+                "{} messages waiting · /queue inspect · Esc stops and keeps the queue",
+                self.session.pending.len()
+            )
+        } else if self.notice.is_empty() {
             "↵ send   / commands   F2 work   F3 review   Ctrl+P sessions   Esc stop".into()
         } else {
             clean(&self.notice)
@@ -1064,7 +1215,10 @@ impl App {
             }
         }
         if let Some(popup) = &self.popup {
-            let decision = matches!(popup, Popup::Approval(_) | Popup::Question { .. });
+            let decision = matches!(
+                popup,
+                Popup::Approval(_) | Popup::Question { .. } | Popup::Redirect { .. }
+            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting"));
             let side_by_side = decision && pet_width > 0 && chat.width >= 42;
             if !side_by_side {
                 self.image_area = Rect::default();
@@ -1340,6 +1494,7 @@ impl App {
             vertical: 2,
         });
         let (title,text,scroll)=match p{
+   Popup::Redirect{input,..}=>("弄玉 · change direction".into(),format!("Tell me what to change.\nPending actions will be cancelled when you send.\n\n› {input}\n\nEnter send · Esc return to the decision"),0),
    Popup::Question{question,options,input,..}=>("弄玉 · a question for you".into(),format!("{}\n\n{}\n\nOr type an answer:\n› {}",question,options.iter().enumerate().map(|(i,o)|format!("[{}] {o}",i+1)).collect::<Vec<_>>().join("\n"),input),0),
    Popup::Info{title,text,scroll}=>(title.clone(),text.clone(),*scroll),
    Popup::Approval(a)=>(format!("Allow {}?",a.tool),a.preview.clone(),a.scroll),
@@ -1364,13 +1519,14 @@ impl App {
         );
         if matches!(p, Popup::Approval(_)) {
             f.render_widget(
-                Paragraph::new("y allow once · n deny · ↑↓ review · Esc cancel").style(style(GOLD)),
+                Paragraph::new("y allow · n deny · Ctrl+G redirect · ↑↓ review").style(style(GOLD)),
                 Rect::new(inner.x, inner.bottom(), inner.width, 1),
             );
         }
         if matches!(p, Popup::Question { .. }) {
             f.render_widget(
-                Paragraph::new("1–5 choose · Enter send · Esc dismiss").style(style(GOLD)),
+                Paragraph::new("1–5 choose · Enter send · Ctrl+G redirect · Esc dismiss")
+                    .style(style(GOLD)),
                 Rect::new(inner.x, inner.bottom(), inner.width, 1),
             );
         }
@@ -1619,6 +1775,62 @@ mod layout_tests {
         App::new(cfg, cli, store).unwrap()
     }
     use clap::Parser;
+    fn finish(a: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while a.running.is_some() {
+            assert!(Instant::now() < deadline);
+            a.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn stopped_follow_up_survives_resume_without_autorunning() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.submit("first message".into()).unwrap();
+        a.enqueue("saved next task".into(), Delivery::FollowUp)
+            .unwrap();
+        a.stop();
+        finish(&mut a);
+        let id = a.session.id.clone();
+        assert_eq!(a.store.load(&id).unwrap().pending.len(), 1);
+        let cfg = a.cfg.clone();
+        let mut cli = a.cli.clone();
+        cli.resume = Some(id);
+        drop(a);
+        let store = Store::open(&cfg.state).unwrap();
+        let mut b = App::new(cfg, cli, store).unwrap();
+        assert!(b.running.is_none());
+        assert_eq!(b.session.pending[0].text, "saved next task");
+        b.command("/next").unwrap();
+        finish(&mut b);
+        assert!(b.session.pending.is_empty());
+        assert!(
+            b.session
+                .entries
+                .iter()
+                .any(|e| e.role == "you" && e.text == "saved next task")
+        );
+    }
+    #[test]
+    fn follow_up_runs_once_after_a_normal_turn() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.submit("first message".into()).unwrap();
+        a.enqueue("second message".into(), Delivery::FollowUp)
+            .unwrap();
+        finish(&mut a);
+        assert!(a.session.pending.is_empty());
+        assert_eq!(
+            a.session
+                .entries
+                .iter()
+                .filter(|e| e.role == "you" && e.text == "second message")
+                .count(),
+            1
+        );
+        assert!(a.store.load(&a.session.id).unwrap().pending.is_empty());
+    }
     #[test]
     fn pasted_question_answer_keeps_the_composer_draft() {
         let d = tempfile::tempdir().unwrap();
@@ -1636,6 +1848,43 @@ mod layout_tests {
             .unwrap();
         assert_eq!(rx.recv().unwrap(), "中文");
         assert_eq!(a.input, "Keep my draft");
+    }
+    #[test]
+    fn redirect_can_return_to_decision_or_cancel_it_with_new_input() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.submit("steering demo".into()).unwrap();
+        a.input_set("Keep this draft");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(a.popup, Some(Popup::Approval(_))) {
+            assert!(Instant::now() < deadline);
+            a.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let redirect = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        a.key(redirect).unwrap();
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(a.popup, Some(Popup::Approval(_))));
+        assert!(!d.path().join("stale.json").exists());
+        a.key(redirect).unwrap();
+        a.paste("Use steer-proof-486 instead.");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        while a.running.is_some() {
+            assert!(Instant::now() < deadline);
+            a.tick().unwrap();
+            if let Some(Popup::Approval(approval)) = &a.popup {
+                assert!(approval.preview.contains("steered.json"));
+                a.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+                    .unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(a.input, "Keep this draft");
+        assert!(!d.path().join("stale.json").exists());
+        assert!(d.path().join("steered.json").exists());
+        assert!(a.session.pending.is_empty());
     }
     #[test]
     fn renders_compact_wide_and_popups() {

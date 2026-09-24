@@ -23,6 +23,27 @@ pub struct Check {
     pub passed: bool,
     pub detail: String,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    Steer,
+    FollowUp,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingMessage {
+    pub id: String,
+    pub text: String,
+    pub delivery: Delivery,
+}
+impl PendingMessage {
+    pub fn new(text: String, delivery: Delivery) -> Self {
+        Self {
+            id: Uuid::new_v4().simple().to_string()[..12].into(),
+            text,
+            delivery,
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
@@ -44,6 +65,8 @@ pub struct Session {
     pub parent: Option<String>,
     #[serde(default)]
     pub work: crate::work::Work,
+    #[serde(default)]
+    pub pending: Vec<PendingMessage>,
 }
 impl Session {
     pub fn new(project: PathBuf, model: String, demo: bool) -> Self {
@@ -67,6 +90,7 @@ impl Session {
             checks: vec![],
             parent: None,
             work: Default::default(),
+            pending: vec![],
         }
     }
     pub fn add(&mut self, role: &str, text: impl Into<String>) {
@@ -84,6 +108,7 @@ impl Session {
         s.created = Utc::now().to_rfc3339();
         s.updated = s.created.clone();
         s.status = "idle".into();
+        s.pending.clear();
         s
     }
 }
@@ -181,6 +206,20 @@ pub fn atomic_json(path: &Path, data: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn older_sessions_default_queue_and_forks_do_not_duplicate_pending_work() {
+        let mut s = Session::new(PathBuf::from("/project"), "test".into(), true);
+        s.pending
+            .push(PendingMessage::new("next".into(), Delivery::FollowUp));
+        assert!(s.fork().pending.is_empty());
+        assert_eq!(s.pending.len(), 1);
+        let mut old = serde_json::to_value(&s).unwrap();
+        old.as_object_mut().unwrap().remove("pending");
+        old.as_object_mut().unwrap().remove("work");
+        let restored: Session = serde_json::from_value(old).unwrap();
+        assert!(restored.pending.is_empty());
+        assert!(restored.work.goal.is_empty());
+    }
     #[test]
     fn persist_fork_export_and_lock() {
         let d = tempfile::tempdir().unwrap();

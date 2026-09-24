@@ -96,10 +96,17 @@ Type `/` for a searchable command menu. Tab completes; Enter chooses. `Ctrl+P` o
 | `/check FILE [JSON]` | Check existence, or compare saved JSON with an expected value |
 | `/work` | Inspect the current task plan, files and independent evidence |
 | `/review` | Review diffs from file tools in this turn |
+| `/steer MESSAGE` | Redirect current work at the next tool boundary |
+| `/follow MESSAGE` | Queue the next task after a normal finish |
+| `/queue`, `/next`, `/drop ID` | Inspect, resume or remove waiting messages |
 | `/tools` | Expand or collapse tool output |
 | `/mood`, `/look`, `/pet` | Interact with the character |
 | `/demo` | Run a scripted, real file-write and verification example |
 | `/status`, `/help`, `/stop`, `/quit` | Inspect, learn, interrupt, leave |
+
+While work runs, **Enter steers** and **Alt+Enter queues a follow-up**. **Ctrl+G** opens a direction box, including during a question or approval; Escape returns to the existing decision. Sending a correction cancels pending decisions and skips tool calls that have not started. An already-running command can finish; use Escape to stop it. 弄玉 acknowledges the new direction and her work card follows the updated task.
+
+The queue is saved with the conversation (up to eight messages / 32 KB). A normal finish advances it; a stop, error or restart leaves it waiting for `/next`. Forks start with an empty queue so the same pending work does not run in two conversations.
 
 Forks share the project filesystem. They do not roll back files. Compaction is deterministic local context reduction, not an LLM-generated summary; the full earlier session is archived privately before reduction.
 
@@ -127,7 +134,7 @@ chmod 600 .env
 
 Aster reads only the named MiniMax settings from this file; environment variables take precedence. The default model is `MiniMax-M2.7`, via MiniMax's Anthropic-compatible endpoint. Responses stream into the conversation, including streamed tool arguments. Full assistant blocks are retained privately for provider-compatible continuation. Provider redirects are rejected.
 
-Each user turn permits at most 12 model requests, 24 tool calls, 180 seconds, 2,048 output tokens per request and 12,000 output tokens overall. These are work limits, not a currency cap; input tokens also incur usage. Errors and truncated streams stop without automatic retries. A submitted request may finish and consume tokens after local cancellation.
+Each user turn permits at most 12 model requests, 24 tool calls, 180 active seconds, 2,048 output tokens per request and 12,000 output tokens overall. Question and approval waits pause the active timer, with a 15-minute maximum per decision. Unexecuted or declined checks are not recorded as failed tests. These are work limits, not a currency cap; input tokens also incur usage. Errors and truncated streams stop without automatic retries. A submitted request may finish and consume tokens after local cancellation.
 
 For command-line use without the TUI:
 

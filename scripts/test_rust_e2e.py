@@ -7,6 +7,7 @@ import tempfile
 import time
 import pexpect
 import pyte
+from terminal_helpers import screen_text, stop_child
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,12 +42,12 @@ def main():
                 stream.feed(chunk)
             except pexpect.TIMEOUT: pass
             except pexpect.EOF: raise AssertionError('Terminal exited unexpectedly')
-            return '\n'.join(screen.display)
+            return screen_text(screen)
         def wait(needle,timeout=12):
             deadline=time.monotonic()+timeout
             while time.monotonic()<deadline:
                 if needle in pump(): return
-            raise AssertionError(f'Missing screen text {needle!r}\n'+ '\n'.join(screen.display))
+            raise AssertionError(f'Missing screen text {needle!r}\n'+ screen_text(screen))
         def send(command,needle):
             child.send(command+'\r');wait(needle)
         def dismiss(needle,timeout=12):
@@ -106,6 +107,6 @@ def main():
             (qa/'rust-terminal-e2e.json').write_text(json.dumps(evidence,indent=2))
             print(json.dumps(evidence,indent=2))
         finally:
-            if child.isalive():child.terminate(force=True)
+            stop_child(child, stream)
 
 if __name__=='__main__':main()

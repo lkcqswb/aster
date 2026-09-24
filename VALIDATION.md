@@ -1,3 +1,14 @@
+# Steering and durable messages 0.4 — 2026-09-24
+
+- **34 Rust tests passed**, including steering before execution, cancelling an unapproved write, preserving provider tool/result pairs, direction-box cancellation, saved follow-ups across stop/resume, and excluding unexecuted actions from check evidence. Formatting, Clippy with warnings denied and the release build passed.
+- The keyboard queue test passed: Enter steers, Alt+Enter schedules a follow-up, a stopped queue survives restart, restart does not run it automatically, and `/next` consumes its message once. No API calls. Evidence: `.aster/qa/queue-e2e.json`.
+- One live MiniMax task was redirected through **Ctrl+G** while `original.json` was awaiting approval. The original file was never created; only `final.json` was approved, its exact JSON passed `check_file`, and the direction was recorded once. Session `ad8fae1e7a0c`: **4 model requests, 2 executed tools, 2,474 input tokens, 309 output tokens**, exit 0. No provider retry. Evidence: `.aster/qa/steering-live.json`.
+- The real companion workflow passed again with **40 distinct Live2D frames**, including animation during questions/approvals, the selected Chinese answer affecting the file, exact edits, checks, review and resizing. One startup needed the bounded local renderer retry. Evidence: `.aster/qa/companion-work-e2e.json`.
+- PTY text snapshots now handle isolated wide-character continuation cells in the test emulator after resize. Failed companion tests request graceful application shutdown before forced termination.
+- Human decision waits no longer consume the 180-second active work budget; each decision expires after 15 minutes without assuming an answer. These limits are not a currency budget.
+
+---
+
 # Companion workbench 0.3 — 2026-09-24
 
 - **27 Rust tests passed**, including precise edits, ambiguous/stale edit rejection, paginated reads, a concurrent user edit during approval, question answers and paste handling, plan/evidence separation, prose/code wrapping and existing tool boundaries. Formatting, Clippy with warnings denied, and the release build passed.

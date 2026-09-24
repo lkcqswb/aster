@@ -12,6 +12,7 @@ import tempfile
 import time
 import pexpect
 import pyte
+from terminal_helpers import screen_text, stop_child
 
 ROOT=Path(__file__).resolve().parents[1]
 SOURCE='def total(prices):\n    return sum(prices) + 1\n'
@@ -40,7 +41,7 @@ def main():
         def pump():
             try:stream.feed(child.read_nonblocking(65536,timeout=.1))
             except pexpect.TIMEOUT:pass
-            return '\n'.join(screen.display)
+            return screen_text(screen)
         try:
             deadline=time.monotonic()+10
             while 'aster' not in pump():assert time.monotonic()<deadline

@@ -112,7 +112,7 @@ fn choices(work: &Work, running: bool, decision: bool, available: &Available) ->
             "Exact file diffs recorded during this task.",
         );
     }
-    if !work.evidence.is_empty() && !(work.has_failures() || work.has_stale_checks()) {
+    if !(work.evidence.is_empty() || work.has_failures() || work.has_stale_checks()) {
         add(
             Action::Command("/checks"),
             "Check the evidence",

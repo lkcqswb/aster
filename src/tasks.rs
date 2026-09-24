@@ -80,10 +80,10 @@ pub fn discover(root: &Path) -> Result<Catalog> {
                 || task.command.trim().is_empty()
                 || task.command.len() > 4000
                 || task.command.contains('\0')
-                || !(1..=120).contains(&task.timeout_secs)
+                || !(1..=600).contains(&task.timeout_secs)
             {
                 bail!(
-                    "Task {} needs a command of 1–4000 bytes, description up to 240 bytes and timeout of 1–120 seconds",
+                    "Task {} needs a command of 1–4000 bytes, description up to 240 bytes and timeout of 1–600 seconds",
                     task.name
                 );
             }

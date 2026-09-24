@@ -14,17 +14,30 @@ pub struct Choice {
     pub label: &'static str,
     pub detail: &'static str,
 }
+/// What exists right now, so the menu never offers a dead end.
+#[derive(Clone, Debug, Default)]
+pub struct Available {
+    pub checkpoint: bool,
+    pub waiting: usize,
+    pub skills: usize,
+    pub prompts: usize,
+    pub entries: usize,
+    pub messages: usize,
+    pub plan_mode: bool,
+}
 pub struct Menu {
     pub items: Vec<Choice>,
     pub query: String,
     pub index: usize,
+    pub available: Available,
 }
 impl Menu {
-    pub fn new(work: &Work, running: bool, decision: bool) -> Self {
+    pub fn new(work: &Work, running: bool, decision: bool, available: Available) -> Self {
         Self {
-            items: choices(work, running, decision),
+            items: choices(work, running, decision, &available),
             query: String::new(),
             index: 0,
+            available,
         }
     }
     pub fn filtered(&self) -> Vec<&Choice> {
@@ -40,7 +53,7 @@ impl Menu {
     }
     pub fn refresh(&mut self, work: &Work, running: bool, decision: bool) {
         let selected = self.filtered().get(self.index).map(|c| c.action);
-        self.items = choices(work, running, decision);
+        self.items = choices(work, running, decision, &self.available);
         self.index = self
             .filtered()
             .iter()
@@ -55,7 +68,7 @@ impl Menu {
         }
     }
 }
-fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
+fn choices(work: &Work, running: bool, decision: bool, available: &Available) -> Vec<Choice> {
     let mut items = vec![];
     let mut add = |action, label, detail| {
         items.push(Choice {
@@ -85,11 +98,27 @@ fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
             "See failures, stale passes and earlier results.",
         );
     }
-    add(
-        Action::Command("/work"),
-        "Follow our plan",
-        "Current step, activity and recorded evidence.",
-    );
+    if !work.goal.is_empty() {
+        add(
+            Action::Command("/work"),
+            "Follow our plan",
+            "Current step, activity and recorded evidence.",
+        );
+    }
+    if !work.diffs.is_empty() {
+        add(
+            Action::Command("/review"),
+            "Review this turn's changes",
+            "Exact file diffs recorded during this task.",
+        );
+    }
+    if !(work.evidence.is_empty() || work.has_failures() || work.has_stale_checks()) {
+        add(
+            Action::Command("/checks"),
+            "Check the evidence",
+            "Actual checks and their history; not model claims.",
+        );
+    }
     add(
         Action::Command("/tasks"),
         "Run a project check or build",
@@ -105,48 +134,46 @@ fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
         "Find something in the project",
         "Search locally and read the matching lines.",
     );
-    add(
-        Action::Command("/review"),
-        "Review this turn's changes",
-        "Exact file diffs recorded during this task.",
-    );
-    if !(work.has_failures() || work.has_stale_checks()) {
+    if available.waiting > 0 {
         add(
-            Action::Command("/checks"),
-            "Check the evidence",
-            "Actual checks and their history; not model claims.",
+            Action::Command("/queue"),
+            "See waiting messages",
+            "Saved directions and follow-up tasks.",
+        );
+    }
+    if available.skills > 0 {
+        add(
+            Action::Command("/skills"),
+            "Choose a skill",
+            "Inspect resources and prepare an explicit request.",
+        );
+    }
+    if available.prompts > 0 {
+        add(
+            Action::Command("/prompts"),
+            "Choose a task prompt",
+            "Prepare a reusable request before sending it.",
+        );
+    }
+    if available.entries > 0 {
+        add(
+            Action::Command("/history"),
+            "Find an earlier conversation entry",
+            "Search what we said, read it or jump back to it.",
         );
     }
     add(
-        Action::Command("/history"),
-        "Find an earlier conversation entry",
-        "Search what we said, read it or jump back to it.",
-    );
-    add(
         Action::Command("/context"),
         "Inspect what I can see",
-        "Instructions, used skills and attached references.",
+        "Context size, instructions, skills and attached references.",
     );
-    add(
-        Action::Command("/checkpoint"),
-        "Review our context checkpoint",
-        "Inspect retained history and restore full context.",
-    );
-    add(
-        Action::Command("/skills"),
-        "Choose a skill",
-        "Inspect resources and prepare an explicit request.",
-    );
-    add(
-        Action::Command("/prompts"),
-        "Choose a task prompt",
-        "Prepare a reusable request before sending it.",
-    );
-    add(
-        Action::Command("/queue"),
-        "See waiting messages",
-        "Saved directions and follow-up tasks.",
-    );
+    if available.checkpoint {
+        add(
+            Action::Command("/checkpoint"),
+            "Review our context checkpoint",
+            "Read the summary and restore the full archived context.",
+        );
+    }
     if running {
         add(
             Action::Redirect,
@@ -158,7 +185,50 @@ fn choices(work: &Work, running: bool, decision: bool) -> Vec<Choice> {
             "Stop the current task",
             "Cancel work and keep saved follow-up messages.",
         );
+    } else {
+        add(
+            Action::Command("/sessions"),
+            "Open another conversation",
+            "Pick up where you left off in this project.",
+        );
+        add(
+            Action::Command("/new"),
+            "Start a new conversation",
+            "This one is saved; project files are shared.",
+        );
+        if available.messages > 0 {
+            add(
+                Action::Command("/compact"),
+                "Summarize earlier context",
+                "Archive everything, keep recent exchanges and a summary.",
+            );
+        }
+        if available.plan_mode {
+            add(
+                Action::Command("/build"),
+                "Switch to build mode",
+                "Allow file changes and commands, with your approval setting.",
+            );
+        } else {
+            add(
+                Action::Command("/plan"),
+                "Switch to plan mode",
+                "Read and discuss only; no file changes or commands.",
+            );
+        }
     }
+    if !running {
+        add(
+            Action::Command("/models"),
+            "Models and API keys",
+            "Add a provider or key, add model names, choose one.",
+        );
+    }
+    add(
+        Action::Command("/help"),
+        "Keys and commands",
+        "Every shortcut and slash command in one place.",
+    );
     items
 }
 
@@ -168,7 +238,7 @@ mod tests {
     #[test]
     fn lifecycle_changes_remove_obsolete_actions_and_keep_the_filter() {
         let work = Work::default();
-        let mut menu = Menu::new(&work, true, true);
+        let mut menu = Menu::new(&work, true, true, Available::default());
         assert_eq!(menu.items[0].action, Action::Return);
         menu.paste("stop");
         assert_eq!(menu.filtered()[0].action, Action::Stop);
@@ -181,6 +251,31 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c.action, Action::Return | Action::Stop | Action::Redirect))
         );
+        // Dead ends are hidden until there is something behind them.
+        assert!(!menu.items.iter().any(|c| matches!(
+            c.action,
+            Action::Command("/review" | "/checkpoint" | "/queue")
+        )));
+        let mut work = Work::default();
+        work.diffs.push(("a.rs".into(), "+x".into()));
+        let rich = Menu::new(
+            &work,
+            false,
+            false,
+            Available {
+                checkpoint: true,
+                waiting: 1,
+                ..Default::default()
+            },
+        );
+        for command in ["/review", "/checkpoint", "/queue", "/sessions", "/plan"] {
+            assert!(
+                rich.items
+                    .iter()
+                    .any(|c| c.action == Action::Command(command)),
+                "{command}"
+            );
+        }
         menu.query.clear();
         menu.paste("files");
         assert_eq!(menu.filtered()[0].action, Action::Command("/files"));

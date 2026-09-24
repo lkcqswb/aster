@@ -43,7 +43,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/sessions", "Find and resume a session"),
     ("/rename", "Name this conversation"),
     ("/fork", "Branch the conversation"),
-    ("/model", "Choose live MiniMax or demo"),
+    ("/models", "Add API keys and choose a model"),
+    ("/model", "Use a model name, live or demo"),
     (
         "/history",
         "Search and revisit earlier conversation entries",
@@ -98,6 +99,20 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/quit", "Save and leave"),
 ];
 
+/// Commands that cannot do anything useful without an argument.
+const NEEDS_ARGUMENT: &[&str] = &[
+    "/rename",
+    "/skill",
+    "/prompt",
+    "/check",
+    "/run",
+    "/task",
+    "/steer",
+    "/follow",
+    "/drop",
+    "/restore",
+    "/permissions",
+];
 pub fn clean(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -305,6 +320,7 @@ enum Popup {
     },
     History(crate::history::History),
     Actions(crate::actions::Menu),
+    Models(Box<crate::models::Panel>),
     Project(Box<crate::navigator::Navigator>),
     Resources {
         items: Vec<crate::context::Resource>,
@@ -376,6 +392,11 @@ pub struct App {
     turn_started: Option<Instant>,
     cell_px: (f32, f32),
     meter: Option<((String, usize, String), u64)>,
+    /// The conversation's provider name and context window.
+    endpoint: (String, u64),
+    provider_test: Option<crossbeam_channel::Receiver<String>>,
+    /// The checkpoint id before a /compact the user started, to show its result.
+    compacting: Option<Option<String>>,
     quit: bool,
     quit_started: Option<Instant>,
 }
@@ -388,9 +409,9 @@ impl App {
                 .list(&cfg.project)?
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo))
+                .unwrap_or_else(|| fresh_session(&cfg, &cli))
         } else {
-            Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo)
+            fresh_session(&cfg, &cli)
         };
         if session.project != cfg.project {
             bail!(
@@ -410,9 +431,10 @@ impl App {
         let companion = if cli.no_live2d || graphics == Graphics::Off {
             None
         } else {
-            Some(Companion::start(cfg.clone()))
+            Some(Companion::start(cfg.clone(), graphics))
         };
         let prompts = crate::composer::PromptHistory::with(recent_prompts(&store, &session));
+        let endpoint = endpoint(&cfg, &session);
         Ok(Self {
             cfg,
             cli,
@@ -450,6 +472,9 @@ impl App {
             turn_started: None,
             cell_px: cell_pixels(),
             meter: None,
+            endpoint,
+            provider_test: None,
+            compacting: None,
             quit: false,
             quit_started: None,
         })
@@ -476,10 +501,21 @@ impl App {
                         | Popup::Delete
                 )
             );
+        let catalog = crate::context::discover(&self.cfg.project);
+        let available = crate::actions::Available {
+            checkpoint: self.session.checkpoint.is_some(),
+            waiting: self.session.pending.len(),
+            skills: catalog.skills.len(),
+            prompts: catalog.prompts.len(),
+            entries: self.session.entries.len(),
+            messages: self.session.messages.len(),
+            plan_mode: self.session.mode == "plan",
+        };
         self.inspect(Popup::Actions(crate::actions::Menu::new(
             &self.session.work,
             self.running.is_some(),
             decision,
+            available,
         )));
     }
     fn click(&mut self, column: u16, row: u16) -> Result<()> {
@@ -574,6 +610,8 @@ impl App {
             menu.paste(&text);
         } else if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.paste(&text);
+        } else if let Some(Popup::Models(panel)) = &mut self.popup {
+            panel.paste(&text);
         } else if matches!(&self.popup, Some(Popup::Tasks { preview: true, .. })) {
             // Inspecting must not silently change the selected command.
         } else if let Some(
@@ -618,11 +656,10 @@ impl App {
         }
     }
     fn new_session(&mut self, title: &str) -> Result<()> {
-        self.session = Session::new(
-            self.cfg.project.clone(),
-            self.session.model.clone(),
-            self.session.demo,
-        );
+        let demo = self.session.demo;
+        self.session = fresh_session(&self.cfg, &self.cli);
+        self.session.demo = demo;
+        self.refresh_endpoint();
         if !title.is_empty() {
             self.session.title = title.into()
         }
@@ -698,7 +735,7 @@ impl App {
    "/sessions"|"/resume"=>{if !arg.is_empty(){let s=self.store.load(arg)?;self.switch_session(s)?;}else{self.open_sessions()?;}},
    "/rename"=>{if arg.is_empty(){bail!("Use /rename followed by a title")};self.session.title=arg.chars().take(120).collect();self.session.updated=chrono::Utc::now().to_rfc3339();self.persist()?;},
    "/fork"=>{self.session=self.session.fork();if !arg.is_empty(){self.session.title=arg.into()};self.session.add("notice","Forked the conversation. This session shares the project files; no files were rolled back.");self.persist()?;self.notify("New branch saved. Project files are shared.");},
-   "/model"|"/models"=>{match arg{""=>self.info("Choose an agent",format!("Current: {}\n\n/model live     MiniMax · real model\n/model demo     Offline scripted demo\n/model NAME     Use a specific MiniMax model\n\nModel changes take effect on the next message.",if self.session.demo{"offline demo"}else{&self.session.model})),"demo"=>{self.session.demo=true;self.notify("Offline demo · no API calls");},"live"=>{self.session.demo=false;self.notify(format!("MiniMax · {}",self.session.model));},name=>{if name.len()>120{bail!("Model name is too long")};self.session.model=name.into();self.session.demo=false;self.notify(format!("Model: {name}"));}}self.persist()?;},
+   "/model"|"/models"=>{match arg{""=>self.open_models(),"demo"=>{self.session.demo=true;self.notify("Offline demo · no API calls");},"live"=>{self.session.demo=false;self.refresh_endpoint();self.notify(format!("{} · {}",self.endpoint.0,self.session.model));},name=>{if name.len()>120||name.contains(char::is_whitespace){bail!("Use a model name without spaces, up to 120 characters")};self.session.model=name.into();self.session.demo=false;self.refresh_endpoint();self.notify(format!("{} · {name}",self.endpoint.0));}}self.persist()?;},
    "/agents"=>{let rules=instructions::load(&self.cfg.project)?;self.info("Project instructions",if rules.is_empty(){"No AGENTS.md found. /init creates project guidance.".into()}else{instructions::format(&rules)});},
    "/init"=>{let p=self.cfg.project.join("AGENTS.md");if p.exists(){self.info("AGENTS.md",fs::read_to_string(p)?)}else{tools::path(&self.cfg.project,"AGENTS.md")?;crate::session::private_write(&p,b"# Project guidance\n\n- Inspect relevant files before making changes.\n- Keep changes focused on the requested task.\n- Run the project's relevant checks and report actual results.\n- Do not read or publish credentials.\n\n## Build and test\n\nAdd this project's build and test commands here.\n")?;self.notify("Created AGENTS.md. Use /agents to inspect it.");}},
    "/plan"=>{self.session.mode="plan".into();self.persist()?;self.notify("Plan mode · read and discuss, no writes or shell commands");},
@@ -728,10 +765,10 @@ impl App {
            self.notify("Companion control queued · /pet info shows the renderer result");
        }
    },
-   "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true)}self.reaction=Some(("listening".into(),Instant::now()));},
-   "/pet"=>{match arg { "info" => {self.info("Companion interface v1",serde_json::to_string_pretty(&json!({"api":self.portrait.info["api"],"control":self.portrait.info["control"],"results":self.portrait.info["control_results"]}))?);}, "reset" => {self.companion.as_ref().context("Live2D is hidden; use /pet on")?.control(crate::companion::Control::Reset)?;self.mood="neutral".into();}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone()));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone()));}, _ => self.notify("Use /pet on, off, retry, info or reset") }self.last_image=None;},
+   "/look"=>{if let Some(c)=&self.companion{c.motion(&self.state,&self.mood,false,true);self.notify("弄玉 looks toward you");}else{self.notify("Live2D is hidden · /pet on shows her");}self.reaction=Some(("listening".into(),Instant::now()));},
+   "/pet"=>{match arg { "info" => {self.info("Companion interface v1",serde_json::to_string_pretty(&json!({"api":self.portrait.info["api"],"control":self.portrait.info["control"],"results":self.portrait.info["control_results"]}))?);}, "reset" => {self.companion.as_ref().context("Live2D is hidden; use /pet on")?.control(crate::companion::Control::Reset)?;self.mood="neutral".into();self.notify("Companion reset queued · /pet info shows the renderer result");}, "off" => {self.companion=None;self.portrait=Shared::default();}, "on"|"retry"|"restart" => {self.companion=None;self.portrait=Shared::default();self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, "" if self.companion.is_some() => {self.companion=None;self.portrait=Shared::default();}, "" => {self.companion=Some(Companion::start(self.cfg.clone(), self.graphics));}, _ => self.notify("Use /pet on, off, retry, info or reset") }self.last_image=None;},
    "/demo"=>{self.session.demo=true;self.submit(if arg=="work"{"companion demo".into()}else if arg.starts_with("evidence"){format!("evidence demo {}",arg.strip_prefix("evidence").unwrap_or(""))}else if arg.starts_with("command"){format!("command demo {}",arg.strip_prefix("command").unwrap_or(""))}else{"demo task".into()})?;},
-   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo"}else{"MiniMax"},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&self.portrait.info)?,self.cfg.limits.describe())),
+   "/status"=>self.info("Aster · session status",format!("Session    {}\nProject    {}\nModel      {}\nProvider   {}\nMode       {} · permissions {}\nUsage      {} input / {} output tokens\nTools      {}\nChecks     {} passed / {} total\n\nGraphics   {}\nLive2D     {}\nFrames     {}\n\n{}\n\nTurn limits\n{}\nDecision waits pause the timer (up to 15 minutes each).\nNo automatic retries. Token limits are not a currency budget.",self.session.id,self.cfg.project.display(),self.session.model,if self.session.demo{"scripted demo".to_string()}else{self.endpoint.0.clone()},self.session.mode,self.cli.permissions,self.session.input_tokens,self.session.output_tokens,self.session.tools,self.session.checks.iter().filter(|c|c.passed).count(),self.session.checks.len(),self.graphics.name(),self.portrait.status,self.portrait.frames,serde_json::to_string_pretty(&{let mut info=self.portrait.info.clone();if let Some(api)=info.get_mut("api"){*api=json!(format!("{} parameters · /pet info shows them",api["parameters"].as_array().map_or(0,|p|p.len())));}info})?,self.cfg.limits.describe())),
    "/stop"=>self.stop(),
    "/delete"=>self.popup=Some(Popup::Delete),
    "/help"=>self.info("Make yourself at home",format!("{}\n\nWRITING\nEnter send · Ctrl+J, Shift+Enter or \\ Enter new line\n↑↓ move between lines, then through earlier requests\nAlt/Ctrl+←→ or Alt+B/F word · Home/End line · Ctrl+A/E line\nCtrl+W or Alt+Backspace delete word · Ctrl+U/K delete to line start/end\nEsc Esc clears the draft (↑ brings it back) · Ctrl+C clears, then quits\n\nREADING\nPgUp/PgDn page · Shift+↑↓ or wheel 3 lines · Ctrl+Home top · Ctrl+End or Esc latest\nCtrl+O shows tool details · F7 searches history\n\nWORKING\nWhile 弄玉 works: Enter steers · Alt+Enter queues · Ctrl+G redirects · Esc stops\nCtrl+P sessions (Enter open · Ctrl+N new · Ctrl+D delete)\nF1 or click 弄玉 for local task controls · F2 plan · F3 review · F4 output\nF5 checks · F6 files · F7 history · F8 tasks\n\nThe model is an AI companion. Speaking motion follows text activity; no voice is synthesized.",COMMANDS.iter().map(|(a,b)|format!("{a:15} {b}")).collect::<Vec<_>>().join("\n"))),
@@ -755,9 +792,10 @@ impl App {
         self.running = Some(agent::spawn_compaction(
             self.session.clone(),
             note.into(),
-            self.cfg.clone(),
+            self.turn_config()?,
             false,
         ));
+        self.compacting = Some(self.session.checkpoint.as_ref().map(|c| c.id.clone()));
         self.state = "thinking".into();
         self.session.work.activity = "Summarizing earlier context".into();
         self.turn_started = Some(Instant::now());
@@ -947,10 +985,18 @@ impl App {
         submitted.work = crate::work::Work::begin(&prompt);
         self.store.save(&submitted)?;
         self.session = submitted;
+        let cfg = match self.turn_config() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.session = before;
+                self.store.save(&self.session)?;
+                return Err(e);
+            }
+        };
         self.running = Some(agent::spawn(
             before,
             prompt,
-            self.cfg.clone(),
+            cfg,
             self.cli.permissions.clone(),
         ));
         self.stream.clear();
@@ -982,6 +1028,17 @@ impl App {
         }
         if let Some(Popup::Project(nav)) = &mut self.popup {
             nav.tick();
+        }
+        if let Some(result) = self
+            .provider_test
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.provider_test = None;
+            if let Some(Popup::Models(panel)) = &mut self.popup {
+                panel.message = result.clone();
+            }
+            self.notify(result);
         }
         let mut advance_queue = false;
         let events = self
@@ -1126,6 +1183,13 @@ impl App {
                     if self.quit_started.is_some() {
                         self.quit = true;
                     }
+                    // A checkpoint you asked for opens its report, as the local one always has.
+                    if let Some(before) = self.compacting.take()
+                        && self.session.checkpoint.as_ref().map(|c| c.id.clone()) != before
+                        && self.popup.is_none()
+                    {
+                        self.command("/checkpoint")?;
+                    }
                 }
             }
         }
@@ -1137,6 +1201,11 @@ impl App {
             self.run_next()?;
         }
         if let Some(Popup::Actions(menu)) = &mut self.popup {
+            menu.available.waiting = self.session.pending.len();
+            menu.available.checkpoint = self.session.checkpoint.is_some();
+            menu.available.entries = self.session.entries.len();
+            menu.available.messages = self.session.messages.len();
+            menu.available.plan_mode = self.session.mode == "plan";
             menu.refresh(
                 &self.session.work,
                 self.running.is_some(),
@@ -1409,6 +1478,59 @@ impl App {
                         _ => {}
                     }
                     self.popup = Some(Popup::Actions(menu));
+                }
+                Popup::Models(mut panel) => {
+                    match panel.key(key) {
+                        crate::models::Outcome::Keep => self.popup = Some(Popup::Models(panel)),
+                        crate::models::Outcome::Close => {}
+                        crate::models::Outcome::Saved(message) => {
+                            self.notify(message);
+                            self.popup = Some(Popup::Models(panel));
+                        }
+                        crate::models::Outcome::Use {
+                            provider,
+                            model,
+                            demo,
+                        } => {
+                            if self.running.is_some() {
+                                panel.message =
+                                    "Finish or stop the current turn before switching models"
+                                        .into();
+                                self.popup = Some(Popup::Models(panel));
+                                return Ok(());
+                            }
+                            self.session.demo = demo;
+                            if !demo {
+                                self.session.provider = provider;
+                                self.session.model = model;
+                            }
+                            self.refresh_endpoint();
+                            self.persist()?;
+                            self.notify(if demo {
+                                "Offline demo · no API calls".to_string()
+                            } else {
+                                format!(
+                                    "{} · {} for this and new conversations",
+                                    self.endpoint.0, self.session.model
+                                )
+                            });
+                        }
+                        crate::models::Outcome::Test { provider, model } => {
+                            let mut cfg = self.cfg.clone();
+                            let registry = crate::providers::Registry::load(
+                                &crate::providers::Registry::path(&self.cfg.state),
+                            )?;
+                            registry.apply(&mut cfg, Some(&provider), &model)?;
+                            let (tx, rx) = crossbeam_channel::bounded(1);
+                            std::thread::spawn(move || {
+                                let _ = tx.send(agent::probe(&cfg, &model));
+                            });
+                            self.provider_test = Some(rx);
+                            panel.message = "Testing with one tiny request (a few tokens)…".into();
+                            self.popup = Some(Popup::Models(panel));
+                        }
+                    }
+                    return Ok(());
                 }
                 Popup::Project(mut nav) => {
                     match nav.key(key) {
@@ -1821,6 +1943,7 @@ impl App {
             );
         }
         self.session = session;
+        self.refresh_endpoint();
         self.follow_latest();
         self.stream.clear();
         self.state = "idle".into();
@@ -1949,8 +2072,17 @@ impl App {
             }
             KeyCode::Enter => {
                 if !suggestions.is_empty() && self.composer.text.trim() != suggestions[chosen].0 {
-                    self.input_set(suggestions[chosen].0);
-                    return Ok(());
+                    let command = suggestions[chosen].0;
+                    if NEEDS_ARGUMENT.contains(&command) {
+                        self.input_set(format!("{command} "));
+                        self.notify(format!(
+                            "{command} needs a little more · type it, then Enter"
+                        ));
+                        return Ok(());
+                    }
+                    self.prompts.push(command);
+                    self.input_set("");
+                    return self.command(command);
                 }
                 // A trailing backslash continues the message on a new line.
                 if self.composer.text[..self.composer.cursor].ends_with('\\') {
@@ -2039,7 +2171,44 @@ impl App {
                 tokens
             }
         };
-        tokens * 100 / self.cfg.limits.context_tokens.max(1)
+        tokens * 100 / self.window().max(1)
+    }
+    fn window(&self) -> u64 {
+        if self.endpoint.1 > 0 {
+            self.endpoint.1
+        } else {
+            self.cfg.limits.context_tokens
+        }
+    }
+    fn refresh_endpoint(&mut self) {
+        self.endpoint = endpoint(&self.cfg, &self.session);
+        self.meter = None;
+    }
+    /// The configuration a turn runs with: the conversation's provider, key and window.
+    fn turn_config(&self) -> Result<Config> {
+        let mut cfg = self.cfg.clone();
+        if !self.session.demo {
+            crate::providers::Registry::load(&crate::providers::Registry::path(&self.cfg.state))?
+                .apply(
+                &mut cfg,
+                self.session.provider.as_deref(),
+                &self.session.model,
+            )?;
+        }
+        Ok(cfg)
+    }
+    fn open_models(&mut self) {
+        let panel = crate::models::Panel::open(
+            crate::providers::Registry::path(&self.cfg.state),
+            (
+                self.session.provider.clone(),
+                self.session.model.clone(),
+                self.session.demo,
+            ),
+            !self.cfg.key.is_empty(),
+            self.cfg.model.clone(),
+        );
+        self.inspect(Popup::Models(Box::new(panel)));
     }
     pub fn draw(&mut self, f: &mut Frame) {
         let all = f.area();
@@ -2062,7 +2231,23 @@ impl App {
             Paragraph::new("─".repeat(area.width as usize)).style(style(LINE)),
             Rect::new(area.x, area.y + 1, area.width, 1),
         );
-        let columns = area.width.saturating_sub(6).max(1) as usize;
+        let pet_width = if self.companion.is_some() || self.portrait.frame.is_some() {
+            if area.width >= 110 {
+                area.width * 34 / 100
+            } else if area.width >= 72 {
+                (area.width * 30 / 100).max(24)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        // Her column runs from the header to the footer, beside the composer, so a growing
+        // draft never moves the portrait (moving it forces the terminal to repaint).
+        let left_width = area
+            .width
+            .saturating_sub(pet_width + if pet_width > 0 { 3 } else { 0 });
+        let columns = left_width.saturating_sub(6).max(1) as usize;
         self.composer_width = columns;
         let rows = self.composer.rows(columns);
         let visible_rows = rows.len().clamp(1, 6) as u16;
@@ -2075,24 +2260,7 @@ impl App {
             area.width,
             composer_y.saturating_sub(area.y + 2),
         );
-        let pet_width = if self.companion.is_some() || self.portrait.frame.is_some() {
-            if area.width >= 110 {
-                area.width * 34 / 100
-            } else if area.width >= 72 {
-                (area.width * 30 / 100).max(24)
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-        let chat = Rect::new(
-            body.x,
-            body.y,
-            body.width
-                .saturating_sub(pet_width + if pet_width > 0 { 3 } else { 0 }),
-            body.height,
-        );
+        let chat = Rect::new(body.x, body.y, left_width, body.height);
         if self.session.entries.is_empty() && self.stream.is_empty() && self.running.is_none() {
             self.welcome(f, chat)
         } else {
@@ -2100,22 +2268,27 @@ impl App {
         }
         if pet_width > 0 {
             let divider = chat.right() + 1;
-            for y in body.y..body.bottom() {
+            for y in body.y..footer_y {
                 f.render_widget(
                     Paragraph::new("│").style(style(LINE)),
                     Rect::new(divider, y, 1, 1),
                 );
             }
-            let pet = Rect::new(body.right() - pet_width, body.y, pet_width, body.height);
+            let pet = Rect::new(
+                area.right() - pet_width,
+                body.y,
+                pet_width,
+                footer_y.saturating_sub(body.y),
+            );
             self.draw_pet(f, pet);
         }
-        let composer = Rect::new(area.x, composer_y, area.width, composer_h);
+        let composer = Rect::new(area.x, composer_y, left_width, composer_h);
         self.draw_composer(f, composer, columns, &rows, visible_rows as usize);
         self.draw_footer(f, Rect::new(area.x, footer_y, area.width, 1));
         let options = self.suggestions();
         if !options.is_empty() && self.popup.is_none() {
             let count = options.len().min(8) as u16;
-            let w = area.width.min(76);
+            let w = left_width.min(76);
             let r = Rect::new(area.x, composer_y.saturating_sub(count + 2), w, count + 2);
             f.render_widget(Clear, r);
             f.render_widget(
@@ -2150,18 +2323,9 @@ impl App {
         }
         self.action_rows.clear();
         if let Some(popup) = &mut self.popup {
-            let decision = matches!(
-                popup,
-                Popup::Approval(_)
-                    | Popup::Actions(_)
-                    | Popup::History(_)
-                    | Popup::Tasks { .. }
-                    | Popup::Project(_)
-                    | Popup::Question { .. }
-                    | Popup::Redirect { .. }
-                    | Popup::Resources { .. }
-            ) || matches!(popup, Popup::Info{title,..} if title.starts_with("Working together") || title.starts_with("Review changes") || title.starts_with("Messages waiting") || title.starts_with("Context beside") || title.starts_with("Skills beside") || title.starts_with("Command output") || title.starts_with("Checks beside") || title.starts_with("Context checkpoint"));
-            let side_by_side = decision && pet_width > 0 && chat.width >= 42;
+            // Every panel opens beside her when there is room; hiding her image would force
+            // the terminal to repaint.
+            let side_by_side = pet_width > 0 && chat.width >= 42;
             // Nothing half-hidden behind a panel: wide characters would tear its border.
             let modal = Rect::new(area.x, body.y, area.width, footer_y.saturating_sub(body.y));
             let behind = if side_by_side { chat } else { modal };
@@ -2176,7 +2340,7 @@ impl App {
                 self.inspection_return.is_some(),
                 &self.session.id,
                 if side_by_side {
-                    Rect::new(chat.x, body.y, chat.width, body.height + composer_h)
+                    Rect::new(chat.x, body.y, chat.width, footer_y.saturating_sub(body.y))
                 } else {
                     modal
                 },
@@ -2194,7 +2358,11 @@ impl App {
         let model = if self.session.demo {
             "offline demo".to_string()
         } else {
-            clean(&self.session.model)
+            format!(
+                "{} · {}",
+                clean(&self.endpoint.0),
+                clean(&self.session.model)
+            )
         };
         let right = format!("{model} · {}", &self.session.id[..6]);
         let room = (r.width as usize).saturating_sub(right.width() + 4);
@@ -2552,10 +2720,17 @@ impl App {
         } else {
             "here with you"
         };
+        // The emotion her renderer has confirmed, whoever asked for it.
+        let feeling = self.portrait.info["control"]["emotion"]
+            .as_str()
+            .filter(|e| *e != "neutral")
+            .map(|e| format!(" · {e}"))
+            .unwrap_or_default();
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("弄玉", style(FG).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("  ◌ {state}"), style(JADE)),
+                Span::styled(feeling, style(GOLD)),
             ])),
             Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), 1),
         );
@@ -2726,11 +2901,31 @@ impl App {
     }
     /// Pixel aspect (width / height) of the latest portrait frame.
     fn portrait_aspect(&self) -> f32 {
-        420.0 / 620.0 // RENDERER-API: frame.width / frame.height
+        self.portrait
+            .frame
+            .as_ref()
+            .filter(|frame| frame.width > 0 && frame.height > 0)
+            .map(|frame| frame.width as f32 / frame.height as f32)
+            .unwrap_or(420.0 / 620.0)
     }
     /// Ask the renderer for frames that fill this area at the terminal's pixel density.
-    fn request_view(&self, _area: Rect) {
-        // RENDERER-API: companion.set_view(width_px, height_px)
+    fn request_view(&self, area: Rect) {
+        let Some(companion) = &self.companion else {
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        // Cell graphics sample the frame down to two pixels per cell; a small canvas is plenty.
+        let cell = if self.graphics == Graphics::Halfblocks {
+            (8.0, 16.0)
+        } else {
+            self.cell_px
+        };
+        companion.set_view(
+            (f32::from(area.width) * cell.0).round() as u32,
+            (f32::from(area.height) * cell.1).round() as u32,
+        );
     }
     fn draw_popup(
         f: &mut Frame,
@@ -2787,6 +2982,7 @@ impl App {
             Popup::History(_) => "↑↓ choose · Enter read · Tab jump · Esc close",
             Popup::Actions(_) => "↑↓ or click · Enter open · Esc back",
             Popup::Project(_) => "",
+            Popup::Models(panel) => panel.hints(),
         };
         let hint_color = if matches!(p, Popup::Approval(_) | Popup::Question { .. }) {
             GOLD
@@ -3101,6 +3297,11 @@ impl App {
             }
             Popup::Actions(_) | Popup::Sessions { .. } => unreachable!("Rendered above"),
             Popup::Project(nav) => nav.view(inner.width as usize, body_height as usize),
+            Popup::Models(panel) => (
+                "Models and API keys".into(),
+                panel.view(inner.width as usize),
+                0,
+            ),
             Popup::Resources {
                 items,
                 skills,
@@ -3233,6 +3434,30 @@ impl App {
         vec![]
     }
 }
+/// A new conversation starts with the model chosen in /models, else MiniMax from .env.
+fn fresh_session(cfg: &Config, cli: &Cli) -> Session {
+    let mut session = Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo);
+    if cli.model.is_none()
+        && let Ok(registry) =
+            crate::providers::Registry::load(&crate::providers::Registry::path(&cfg.state))
+        && let Some(choice) = registry.default.clone()
+        && registry.find(&choice.provider).is_some()
+    {
+        session.provider = Some(choice.provider);
+        session.model = choice.model;
+    }
+    session
+}
+/// The provider name and context window a conversation will use.
+fn endpoint(cfg: &Config, session: &Session) -> (String, u64) {
+    let mut resolved = cfg.clone();
+    let registry = crate::providers::Registry::load(&crate::providers::Registry::path(&cfg.state))
+        .unwrap_or_default();
+    match registry.apply(&mut resolved, session.provider.as_deref(), &session.model) {
+        Ok(()) => (resolved.provider, resolved.limits.context_tokens),
+        Err(_) => ("missing provider".into(), cfg.limits.context_tokens),
+    }
+}
 fn filter_sessions<'a>(items: &'a [Session], query: &str) -> Vec<&'a Session> {
     let query = query.to_lowercase();
     items
@@ -3263,6 +3488,39 @@ fn relative_time(stamp: &str, now: chrono::DateTime<chrono::Utc>) -> String {
         86_400..604_800 => format!("{} d ago", seconds / 86_400),
         _ => then.format("%Y-%m-%d").to_string(),
     }
+}
+/// Rewrite every cell on the rows of `area` from `buffer`, skipping wide-character
+/// continuations exactly as Ratatui's own diff does.
+fn repaint_rows<B: ratatui::backend::Backend>(
+    backend: &mut B,
+    buffer: &ratatui::buffer::Buffer,
+    area: Rect,
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
+    let area = area.intersection(buffer.area);
+    let mut cells = vec![];
+    for y in area.top()..area.bottom() {
+        let mut skip = 0usize;
+        for x in buffer.area.left()..buffer.area.right() {
+            let cell = &buffer[(x, y)];
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            let width = match cell.diff_option {
+                ratatui::buffer::CellDiffOption::Skip => continue,
+                ratatui::buffer::CellDiffOption::ForcedWidth(w) => usize::from(w.get()),
+                _ => cell.symbol().width(),
+            };
+            cells.push((x, y, cell));
+            skip = width.saturating_sub(1);
+        }
+    }
+    backend.draw(cells.into_iter())?;
+    ratatui::backend::Backend::flush(backend)?;
+    Ok(())
 }
 /// Drop whole " · " separated hints from the end until the line fits.
 fn fit_hint(hint: &str, width: usize) -> String {
@@ -3360,13 +3618,14 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 continue;
             }
             let old_area = app.last_image.map(|(_, r)| r);
-            terminal.draw(|f| app.draw(f))?;
-            if old_area.is_some_and(|r| r != app.image_area) {
+            let completed = terminal.draw(|f| app.draw(f))?;
+            let moved = old_area.filter(|r| *r != app.image_area);
+            let snapshot = moved.map(|_| completed.buffer.clone());
+            if let (Some(old), Some(buffer)) = (moved, snapshot) {
+                // Only the rows her previous image covered are rewritten; clearing the whole
+                // screen here made every panel or layout change blink.
                 write!(io::stdout(), "{}", app.graphics.clear())?;
-                // Fullscreen redraw needs no cursor-position round trip. A queued
-                // Escape or an emulator without a reply must not terminate Aster.
-                terminal.resize(terminal.size()?.into())?;
-                terminal.draw(|f| app.draw(f))?;
+                repaint_rows(terminal.backend_mut(), &buffer, old)?;
                 app.last_image = None;
             }
             if app.image_area.width > 0
@@ -3377,7 +3636,7 @@ pub fn run(cfg: Config, cli: Cli, store: Store) -> Result<()> {
                 write!(
                     io::stdout(),
                     "{}",
-                    app.graphics.encode(&frame.png, app.image_area)
+                    app.graphics.encode(frame, app.image_area)
                 )?;
                 io::stdout().flush()?;
                 app.last_image = Some((frame.sequence, app.image_area));
@@ -3464,12 +3723,20 @@ pub fn headless(cfg: Config, cli: Cli, store: Store) -> Result<()> {
             .list(&cfg.project)?
             .into_iter()
             .next()
-            .unwrap_or_else(|| Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo))
+            .unwrap_or_else(|| fresh_session(&cfg, &cli))
     } else {
-        Session::new(cfg.project.clone(), cfg.model.clone(), cli.demo)
+        fresh_session(&cfg, &cli)
     };
     if s.project != cfg.project {
         bail!("Session belongs to another project")
+    }
+    let mut cfg = cfg;
+    if !s.demo {
+        crate::providers::Registry::load(&crate::providers::Registry::path(&cfg.state))?.apply(
+            &mut cfg,
+            s.provider.as_deref(),
+            &s.model,
+        )?;
     }
     let prompt = cli.prompt.as_deref().context("No prompt")?;
     let prior = s.clone();
@@ -3642,12 +3909,13 @@ pub fn screenshot(cfg: Config, cli: Cli, store: Store, path: &Path) -> Result<()
         use base64::Engine;
         let r = app.image_area;
         svg += &format!(
-            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" href=\"data:image/png;base64,{}\"/>",
+            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" href=\"data:{};base64,{}\"/>",
             r.x as usize * cw,
             r.y as usize * ch,
             r.width as usize * cw,
             r.height as usize * ch,
-            base64::engine::general_purpose::STANDARD.encode(&frame.png)
+            frame.format.mime(),
+            base64::engine::general_purpose::STANDARD.encode(&frame.data)
         );
     }
     svg += "</svg>";
@@ -3702,6 +3970,8 @@ mod layout_tests {
             companion_profile: None,
             texture_size: 2048,
             limits: Default::default(),
+            auth: Default::default(),
+            provider: "MiniMax".into(),
         };
         let store = Store::open(&cfg.state).unwrap();
         App::new(cfg, cli, store).unwrap()
@@ -4399,6 +4669,174 @@ mod layout_tests {
         a.command("/compact auto off").unwrap();
         assert!(!a.session.auto_compact);
         assert!(screen(&mut a, 132, 42).contains("auto-compact off"));
+    }
+    /// What a person can see changed after one action.
+    fn visible_state(a: &mut App) -> String {
+        format!(
+            "{}|{:?}|{}|{}|{}|{}|{}|{}|{}",
+            screen(a, 132, 42),
+            a.popup.is_some(),
+            a.running.is_some(),
+            a.session.id,
+            a.session.mode,
+            a.cli.permissions,
+            a.show_tools,
+            a.mood,
+            a.session.entries.len()
+        )
+    }
+    #[test]
+    fn every_command_and_menu_action_gives_visible_feedback() {
+        let d = tempfile::tempdir().unwrap();
+        let mut silent = vec![];
+        for (name, _) in COMMANDS {
+            if matches!(*name, "/quit" | "/delete") {
+                continue;
+            }
+            let mut a = app(d.path());
+            a.session.add("you", "earlier request");
+            a.session.add("nongyu", "earlier reply");
+            let before = visible_state(&mut a);
+            a.input_set(*name);
+            // A complete command name runs on Enter. Errors become footer notices, as in
+            // the event loop.
+            if let Err(e) = a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                a.notify(e.to_string());
+            }
+            for _ in 0..20 {
+                a.tick().unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if visible_state(&mut a) == before {
+                silent.push(name.to_string());
+            }
+            a.stop();
+            finish(&mut a);
+            drop(a);
+        }
+        let menu = {
+            let mut a = app(d.path());
+            a.session.add("you", "earlier request");
+            a.show_actions();
+            let Some(Popup::Actions(menu)) = a.popup.take() else {
+                panic!("menu did not open")
+            };
+            menu
+        };
+        for (index, choice) in menu.items.iter().enumerate() {
+            let mut a = app(d.path());
+            a.session.add("you", "earlier request");
+            a.show_actions();
+            if let Some(Popup::Actions(m)) = &mut a.popup {
+                m.index = index;
+            }
+            screen(&mut a, 132, 42);
+            let before = visible_state(&mut a);
+            if let Err(e) = a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                a.notify(e.to_string());
+            }
+            if visible_state(&mut a) == before {
+                silent.push(format!("menu: {}", choice.label));
+            }
+            drop(a);
+        }
+        assert!(silent.is_empty(), "no visible feedback: {silent:?}");
+    }
+    #[test]
+    fn a_saved_key_reaches_only_its_provider_and_never_the_session_files() {
+        let d = tempfile::tempdir().unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let seen = std::thread::spawn(move || {
+            let mut request = server.recv().unwrap();
+            let headers = request
+                .headers()
+                .iter()
+                .map(|h| (h.field.to_string().to_lowercase(), h.value.to_string()))
+                .collect::<Vec<_>>();
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let events = [
+                json!({"type":"message_start","message":{"usage":{"input_tokens":30}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from the local provider."}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}),
+                json!({"type":"message_stop"}),
+            ];
+            let stream = events
+                .iter()
+                .map(|v| format!("data: {v}\n\n"))
+                .collect::<String>();
+            request
+                .respond(tiny_http::Response::from_string(stream))
+                .unwrap();
+            (headers, serde_json::from_str::<Value>(&body).unwrap())
+        });
+        let mut a = app(d.path());
+        let mut registry = crate::providers::Registry::default();
+        registry
+            .upsert(
+                crate::providers::Provider {
+                    id: String::new(),
+                    name: "Local test".into(),
+                    base,
+                    auth: crate::providers::Auth::XApiKey,
+                    key: "sk-local-SECRET-4242".into(),
+                    models: vec![crate::providers::Model {
+                        name: "test-model".into(),
+                        context: Some(64_000),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+        registry
+            .save(&crate::providers::Registry::path(&a.cfg.state))
+            .unwrap();
+        a.command("/models").unwrap();
+        let text = screen(&mut a, 132, 42);
+        assert!(text.contains("Models and API keys") && text.contains("Local test · test-model"));
+        assert!(!text.contains("SECRET"));
+        // The demo row is highlighted first; Home, then down to the provider's model.
+        press(&mut a, KeyCode::Home);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.session.provider.as_deref(), Some("local-test"));
+        assert!(!a.session.demo);
+        assert_eq!(a.window(), 64_000);
+        assert!(screen(&mut a, 132, 42).contains("Local test · test-model"));
+        a.submit("hello".into()).unwrap();
+        finish(&mut a);
+        let (headers, body) = seen.join().unwrap();
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header("x-api-key"), Some("sk-local-SECRET-4242"));
+        assert_eq!(header("authorization"), None);
+        assert_eq!(header("anthropic-version"), Some("2023-06-01"));
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(a.session.status, "done");
+        let reply = a
+            .session
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.role == "nongyu")
+            .unwrap();
+        assert_eq!(reply.text, "Hello from the local provider.");
+        let saved =
+            fs::read_to_string(a.store.root.join(format!("{}.json", a.session.id))).unwrap();
+        assert!(!saved.contains("SECRET"));
+        let export = fs::read_to_string(a.store.export(&a.session).unwrap()).unwrap();
+        assert!(!export.contains("SECRET"));
+        // New conversations start with the chosen model.
+        a.command("/new").unwrap();
+        assert_eq!(a.session.provider.as_deref(), Some("local-test"));
+        assert_eq!(a.session.model, "test-model");
     }
     #[test]
     fn multiline_composer_follows_the_cursor() {

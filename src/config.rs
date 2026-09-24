@@ -174,6 +174,9 @@ pub struct Config {
     pub chrome: PathBuf,
     pub texture_size: u32,
     pub limits: Limits,
+    /// How the key is sent, and a readable provider name for messages.
+    pub auth: crate::providers::Auth,
+    pub provider: String,
 }
 impl Config {
     pub fn load(cli: &Cli) -> Result<Self> {
@@ -230,6 +233,8 @@ impl Config {
                 .unwrap_or_else(|| user.join("desktop-pet/assets")),
             texture_size: cli.texture_size,
             limits: Limits::from_cli(cli),
+            auth: crate::providers::Auth::Bearer,
+            provider: "MiniMax".into(),
             chrome: cli
                 .chrome
                 .clone()

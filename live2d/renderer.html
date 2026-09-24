@@ -4,12 +4,18 @@
 <script src="vendor/pixi.min.js"></script><script src="vendor/live2dcubismcore.min.js"></script><script src="vendor/pixi-live2d-display-cubism4.min.js"></script>
 <script src="companion.js"></script>
 <script>
+'use strict';
 window.asterReady=false;window.asterError='';window.asterStage='initializing';
 window.asterLoading={requested:0,loaded:0,rig:false,textures:[],warnings:[]};
-window.addEventListener('error',event=>{window.asterError=event.message||'Renderer resource failed';});
-window.addEventListener('unhandledrejection',event=>{window.asterError=String(event.reason||'Renderer promise failed');});
+const asterWarn=message=>{const list=window.asterLoading.warnings;if(list.length<24)list.push(String(message&&message.message||message).slice(0,240))};
+// Before she is ready a failure stops startup; afterwards (an optional resource) it is only recorded.
+window.addEventListener('error',event=>{const m=event.message||'Renderer resource failed';if(window.asterReady)asterWarn(m);else window.asterError=m;});
+window.addEventListener('unhandledrejection',event=>{const m=String(event.reason&&event.reason.message||event.reason||'Renderer promise failed');if(window.asterReady)asterWarn(m);else window.asterError=m;});
 (async()=>{
- const W=420,H=620,canvas=document.getElementById('portrait');
+ // The canvas follows the terminal pane's pixel size (asterFrame's `view`), within these bounds.
+ const MIN_SIDE=160,MAX_SIDE=1400;
+ let W=420,H=620;
+ const canvas=document.getElementById('portrait');
  const app=new PIXI.Application({view:canvas,width:W,height:H,backgroundColor:0x111318,antialias:true,preserveDrawingBuffer:true,autoStart:false});
  window.asterStage='reading renderer settings';
  const settings=await fetch('settings.json').then(r=>{if(!r.ok)throw Error('Renderer settings unavailable');return r.json()});
@@ -45,26 +51,53 @@ window.addEventListener('unhandledrejection',event=>{window.asterError=String(ev
  window.asterStage='positioning model';
  app.stage.addChild(model);
  model.scale.set(1);model.position.set(0,0);
- const measured=model.getBounds();const raw={width:measured.width,height:measured.height};const scale=Math.min(W/raw.width,H/raw.height)*profile.layout.zoom;
- model.scale.set(scale);const box=model.getBounds();
- model.x+=W*profile.layout.center[0]-(box.x+box.width*profile.layout.anchor[0]);model.y+=H*profile.layout.center[1]-(box.y+box.height*profile.layout.anchor[1]);
+ const measured=model.getBounds();const raw={x:measured.x,y:measured.y,width:measured.width,height:measured.height};
+ // The profile's layout, applied to the current canvas size: zoom times the whole-model fit, with
+ // the model's anchor point placed at the canvas's center point (both as fractions).
+ let framing={},framingChanged=true;
+ const frameModel=()=>{
+  const {zoom,center,anchor}=profile.layout;
+  const scale=Math.min(W/raw.width,H/raw.height)*zoom;
+  model.scale.set(scale);
+  model.x=W*center[0]-scale*(raw.x+raw.width*anchor[0]);
+  model.y=H*center[1]-scale*(raw.y+raw.height*anchor[1]);
+  framing={width:W,height:H,zoom,scale:Math.round(scale*1e4)/1e4};
+ };
+ const resize=(width,height)=>{
+  const w=Math.round(Math.min(MAX_SIDE,Math.max(MIN_SIDE,Number(width)||W)));
+  const h=Math.round(Math.min(MAX_SIDE,Math.max(MIN_SIDE,Number(height)||H)));
+  if(w===W&&h===H)return;
+  W=w;H=h;app.renderer.resize(W,H);frameModel();framingChanged=true;
+ };
+ frameModel();
  const engine=AsterCompanion.create(model.internalModel.coreModel,profile);
  window.asterCompanion=engine;
- let dt=100,frame=0,legacyMood='neutral';
+ let dt=100,frame=0,legacyMood='neutral',reportedWarnings=0;
  model.internalModel.on('beforeModelUpdate',()=>engine.apply(dt));
  window.asterFrame=(next={},delta=100)=>{
-  dt=Math.max(0,Math.min(250,delta));
+  const started=performance.now();
+  if(Array.isArray(next.view))resize(next.view[0],next.view[1]);
+  dt=Math.max(0,Math.min(250,Number(delta)||0));
   engine.state(next.state||'idle');
   const results=[];
   const call=(id,action)=>{try{results.push({id,ok:true,result:action()})}catch(error){results.push({id,ok:false,error:String(error.message||error)})}};
-  if(next.mood && next.mood!==legacyMood){call('mood',()=>engine.emotion(next.mood,1));legacyMood=next.mood;}
+  for(const item of (next.commands||[]).slice(0,32))call(item.id,()=>engine.dispatch(item.command));
+  // `mood` repeats the last emotion Aster asked for. It can arrive a frame after the command that
+  // already set it (with its own strength), so it only applies when she is not showing it yet.
+  if(next.mood&&next.mood!==legacyMood){legacyMood=next.mood;if(engine.snapshot().emotion!==next.mood)call('mood',()=>engine.emotion(next.mood,1));}
   if(next.tap)call('tap',()=>engine.motion('nod',1));
   if(next.look)call('look',()=>engine.look(-.25,0,2000));
-  for(const item of (next.commands||[]).slice(0,32))call(item.id,()=>engine.dispatch(item.command));
   model.update(dt);app.renderer.render(app.stage);frame++;
-  return {png:canvas.toDataURL('image/png').split(',')[1],frame,control:engine.snapshot(),results};
+  const jpeg=next.format==='jpeg';
+  const url=canvas.toDataURL(jpeg?'image/jpeg':'image/png',.9);
+  const result={data:url.slice(url.indexOf(',')+1),format:jpeg?'jpeg':'png',width:canvas.width,height:canvas.height,frame,
+   ms:Math.round((performance.now()-started)*10)/10,control:engine.snapshot(),results};
+  if(framingChanged){framingChanged=false;result.framing=framing}
+  const warnings=window.asterLoading.warnings;
+  if(warnings.length!==reportedWarnings){reportedWarnings=warnings.length;result.warnings=warnings.slice(-8)}
+  return result;
  };
- window.asterInfo={model:profile.name,api:engine.describe(),renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings,width:W,height:H,raw:{width:raw.width,height:raw.height}};
- window.asterFrame({state:'idle'});window.asterReady=true;window.asterStage='ready';
+ window.asterInfo={model:profile.name,api:engine.describe(),renderer:'Live2D Cubism + Pixi',textures:model.textures.length,texture_limit:textureLimit,texture_sizes:window.asterLoading.textures,texture_warnings:window.asterLoading.warnings.slice(),width:W,height:H,raw:{width:raw.width,height:raw.height},framing};
+ window.asterFrame({state:'idle'});reportedWarnings=0;window.asterReady=true;window.asterStage='ready';
 })().catch(e=>{window.asterError=String(e&&e.message||e)});
 </script>

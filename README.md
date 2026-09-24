@@ -36,7 +36,7 @@ Put that function in `~/.zshrc`, then run `source ~/.zshrc` once. No Python runt
 
 ## Meet 弄玉
 
-The companion pane is part of the terminal layout, not a separate window. iTerm2 uses inline PNG frames; Ghostty and Kitty use the Kitty graphics protocol. Aster detects these terminals and has an animated character-cell fallback. Select a protocol explicitly with `--graphics iterm`, `--graphics kitty`, or `--graphics halfblocks`.
+The companion pane is part of the terminal layout, not a separate window. iTerm2 receives inline JPEG frames; Ghostty and Kitty receive PNG frames through the Kitty graphics protocol, replaced in place under one image id. Aster detects these terminals and has an animated character-cell fallback that draws each cell as a two-colour quadrant block (four pixels per cell). Select a protocol explicitly with `--graphics iterm`, `--graphics kitty`, or `--graphics halfblocks`.
 
 - Start typing: she becomes attentive.
 - Send a message: she thinks while waiting, works during tools, and speaks during streamed text.
@@ -53,7 +53,7 @@ Her work card tracks the active plan step, file or command, pending decision, an
 
 Reading and checking direct her gaze toward the work; a question keeps her attentive until answered. A completed plan is separate from verification: old checks from an earlier turn never make a new task appear verified, and failed checks remain visible even if a later check passes.
 
-Speaking motion follows text activity. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
+Aster never picks an emotion or gesture for her from reply text or events. Emotions and motions come only from explicit controls: `/emotion`, `/motion`, or a caller of the companion interface (`Companion::control`), and each is confirmed or refused by the renderer. Between controls, her profile's controller keeps her alive from actual application state: slow sway and breathing, periodic blinks, and a pose for each work state (attentive while you type or a decision waits, eyes on the work while reading, mouth moving while text streams). Emotions and motions are applied on top and clamped to the rig's real parameter ranges; parameters the profile does not bind are never driven. This version does not synthesize speech or claim audio lip sync. The companion is a fictional AI character.
 
 By default Aster reads existing assets here:
 
@@ -72,9 +72,9 @@ By default Aster reads existing assets here:
 
 **Custom design:** [Live2D API and autodesign guide](docs/COMPANION_API.md) includes versioned JSON profiles, a JSON Schema, TypeScript contracts, a standalone JavaScript controller and the Rust bridge. You can generate your own emotions/keyframe motions, validate them with `--check-companion`, export actual rig capabilities and preview controls locally. Model assets and vendor SDKs remain local.
 
-Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address.
+Use `--pet-dir /path/to/assets` or `ASTER_PET_DIR` for another location. `--chrome /path/to/chromium` or `ASTER_CHROME` selects the renderer executable. Asset paths are checked and the renderer serves only a model-file allowlist on an ephemeral loopback address. Pose, user data, expression, motion and sound files referenced by the model3.json are included in that allowlist; a missing one is skipped rather than failing startup.
 
-A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at up to 8 fps. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
+A Rust-owned, isolated headless Chromium process runs the existing Cubism Web SDK, then sends real model frames to the Rust TUI at about 15 fps, rendered at the portrait's pixel size with the profile's layout (zoom, center and anchor), and spaced further apart when the renderer needs more time per frame. `/status` reports the measured frame rate. It uses a temporary browser profile and closes with Aster. The terminal, sessions, agent loop, tools, instruction loading and provider client are Rust; Live2D's existing Web SDK and the small drawing bridge are JavaScript. No website UI opens. The model and vendor SDK files are **local dependencies and are not distributed in this repository**.
 
 Startup diagnostics are saved privately in `~/.local/share/aster/diagnostics/live2d.json` (or under your selected `--state-dir`). This is a record of the latest startup or error transition, not a continuously updated frame counter. It contains no conversation or provider key. Renderer traffic stays on loopback and bypasses proxy settings. Browser stderr is retained only in its temporary profile, with a bounded excerpt included when startup fails.
 
@@ -154,11 +154,21 @@ Aster loads `~/.config/aster/AGENTS.md`, followed by ancestor `AGENTS.md` files 
 
 Attach project context with `@path`, `@path:10-30` or `@{path with spaces}`. Skills load on demand from personal or project directories; the searchable picker stays beside 弄玉, and her work card records which skill is in use. [Context, skills and prompt templates](docs/CONTEXT.md) explains limits, locations and examples.
 
-The tools are `read_skill`, `list_files`, `read_file`, `search`, `write_file`, `edit_file`, `shell`, `check_file`, `update_plan` and `ask_user`. File tools reject path traversal, symlinks and credential/private directories. Navigation respects ignore rules and supports directory/glob filters, optional regular expressions, case control and explicit pagination. Reads and focused edits support UTF-8 files up to 2 MB; whole-file writes remain capped at 128 KB. Numbered read pages are bounded to 16 KB and continue across long lines without losing characters. [Project navigation and editing](docs/PROJECT_TOOLS.md) describes the controls and limits.
+弄玉 has sixteen tools:
+
+| Kind | Tools | Approval |
+| --- | --- | --- |
+| Read | `list_files`, `search`, `read_file`, `read_files` (up to 8 files per call), `outline` (definitions with line numbers), `read_skill` | none |
+| Change files | `write_file`, `edit_file`, `multi_edit` (several exact edits to one file, one diff), `move_file`, `delete_file` (one regular file, never a directory) | per action in ask mode; refused in plan mode |
+| Run | `shell` | per action in ask mode; refused in plan mode |
+| Network | `web_fetch` (one HTTP(S) GET, readable text, public addresses only) | per action in ask mode, also in plan mode; refused in deny mode |
+| Work | `check_file`, `update_plan`, `ask_user` | none |
+
+Every file change is prepared first, shown as the exact diff or rename you approve, and refused at commit if the file changed in between. `web_fetch` returns page text marked as untrusted data. It refuses private, loopback and link-local addresses at every redirect and sends no cookies or credentials. File tools reject path traversal, symlinks and credential/private directories. Navigation respects ignore rules and supports directory/glob filters, optional regular expressions, case control and explicit pagination. Reads and focused edits support UTF-8 files up to 2 MB; whole-file writes remain capped at 128 KB. Numbered read pages are bounded to 16 KB and continue across long lines without losing characters. [Project navigation and editing](docs/PROJECT_TOOLS.md) describes the controls and limits.
 
 `edit_file` replaces a single exact occurrence and rejects ambiguous matches. File edits are prepared before approval, displayed as a diff, and committed atomically only if the file still matches the reviewed version. Intervening user edits are preserved. `update_plan` reports progress; it cannot manufacture verification evidence. `ask_user` waits for a numbered choice or a typed answer, and returns that answer to the model before dependent work continues.
 
-By default each write or shell command is shown for approval. `y` allows that action once; `n` or Escape declines it. Plan mode forbids writes and shell commands regardless of the approval setting. **Approved shell commands run as your user and are not a filesystem sandbox.** Credential environment variables are removed from their environment. Commands default to 30 seconds; the model can request 1–120 seconds, bounded by the remaining active turn time. The approval shows the command and requested limit. Output streams into **F4 /output** beside 弄玉, and clicking her during a command opens that view. The final record distinguishes exit status, timeout and your stop action. Capture retains the first and last 16 KB of each stream, while the live panel shows its latest 4 KB. Process-group cancellation stops background children too.
+By default each write or shell command is shown for approval. `y` allows that action once; `n` or Escape declines it. Plan mode forbids writes and shell commands regardless of the approval setting. **Approved shell commands run as your user and are not a filesystem sandbox.** Credential environment variables are removed from their environment. Commands default to 30 seconds; the model can request 1–600 seconds, bounded by the remaining active turn time. The approval shows the command and requested limit. Output streams into **F4 /output** beside 弄玉, and clicking her during a command opens that view. The final record distinguishes exit status, timeout and your stop action. Capture retains the first and last 16 KB of each stream, while the live panel shows its latest 4 KB. Process-group cancellation stops background children too.
 
 **F8 /tasks** discovers project tests, scripts and builds, or reads your explicit `.aster/tasks.json`. Inspect a command beside 弄玉, then run it with the usual permissions and no model request. [Project tasks](docs/TASKS.md) describes discovery, configuration and automation outcomes.
 
@@ -166,15 +176,26 @@ By default each write or shell command is shown for approval. `y` allows that ac
 
 A completed reply means the model finished speaking. A passed check means a specific saved-file assertion was evaluated successfully. Neither alone proves the entire project is correct. Read the actual check or test output.
 
-## MiniMax
+## Models and API keys
 
-Copy `.env.example` to `.env` in the Aster checkout, replace the placeholder and restrict its permissions:
+Type `/models` (or choose **Models and API keys** from F1) to see every model you can use, add a provider or key, and switch models:
+
+- **Enter** uses the highlighted model for this conversation. New conversations start with it too.
+- **a** adds a provider. Presets fill in **Anthropic** (`https://api.anthropic.com`, `x-api-key`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`) and **MiniMax**. **Custom** covers any service with an Anthropic-compatible Messages endpoint, including a local proxy on `http://localhost`.
+- The **API key** field hides what you type or paste. **k** replaces a key; leaving the field empty while editing keeps the saved one.
+- **m** edits a provider's model names, comma-separated. `name=tokens` records a context window, which the context meter and auto-compact use.
+- **t** tests the highlighted model with one tiny request (a few tokens), explicitly and without retrying. It reports the HTTP status, and on failure whether to check the key, base URL or model name.
+- **d** removes a provider and its key after you confirm.
+
+Keys are saved only in `providers.json` beside your private sessions (`~/.local/share/aster`, owner-only, or your `--state-dir`). A key is sent only to its own provider's base URL, as `Authorization: Bearer` or `x-api-key`, whichever you chose. It never appears in sessions, transcripts, exports, notices, diagnostics or debug output; the panel shows only its last four characters. Base URLs must be https; plain http is allowed only for localhost. File tools cannot read the store, but approved shell commands run as your user and could, as with `.env`.
+
+**MiniMax from `.env`** still works without the panel. Copy `.env.example` to `.env` in the Aster checkout, replace the placeholder and restrict its permissions:
 
 ```sh
 chmod 600 .env
 ```
 
-Aster reads only the named MiniMax settings from this file; environment variables take precedence. The default model is `MiniMax-M2.7`, via MiniMax's Anthropic-compatible endpoint. Responses stream into the conversation, including streamed tool arguments. Full assistant blocks are retained privately for provider-compatible continuation. Provider redirects are rejected.
+Aster reads only the named MiniMax settings from this file; environment variables take precedence, and their base URL must be an official MiniMax endpoint. The default model is `MiniMax-M2.7`. Responses stream into the conversation, including streamed tool arguments. Full assistant blocks are retained privately for provider-compatible continuation. Provider redirects are rejected. `/model NAME` switches the model name within the current provider; `/model demo` and `/model live` switch the offline demo on and off.
 
 By default each user turn permits at most 40 model requests, 120 tool calls, 900 active seconds (15 minutes), 8,192 output tokens per request and 64,000 output tokens overall. Shell commands may run up to 600 seconds each, within the turn's remaining time. Change these when starting Aster, for example `aster --max-requests 60 --turn-seconds 1800`, or with `ASTER_MAX_REQUESTS`, `ASTER_MAX_TOOLS`, `ASTER_TURN_SECONDS`, `ASTER_MAX_OUTPUT_TOKENS`, `ASTER_TURN_OUTPUT_TOKENS`, `ASTER_CONTEXT_WINDOW` and `ASTER_AUTO_COMPACT`. `/limits` shows the values in effect. Reaching a limit stops the turn with a message; send a new message to continue. Question and approval waits pause the active timer, with a 15-minute maximum per decision. Unexecuted or declined checks are not recorded as failed tests. These are work limits, not a currency cap; input tokens also incur usage. Errors and truncated streams stop without automatic retries. A submitted request may finish and consume tokens after local cancellation.
 

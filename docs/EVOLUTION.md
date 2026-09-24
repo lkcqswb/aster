@@ -92,3 +92,7 @@ Next: preserve queued work when a turn needs attention, and make resuming that w
 ## Delivered in 0.19
 
 Public Companion API v1 with declarative model/layout/binding profiles, named parameter emotions, one-shot keyframe motions, timed gaze, reset, real parameter bounds and acknowledgement snapshots. The terminal accepts custom emotion/motion names and strengths. JSON Schema, TypeScript types, asset-free contract tests, local profile validation and actual-model interface/preview export support AI-generated designs. Models and SDK assets remain local. Capability introspection found and corrected two nonexistent smile parameter names in the old renderer.
+
+## Delivered in 0.20
+
+The 0.18 follow-up work on top of the Companion API: batch reads, outlines, multi-edits, moves, deletions and web fetch as tools; a models and API keys panel; a frame pipeline that renders at the portrait's pixel size at about 15 fps (JPEG for iTerm2 and cells, PNG for Kitty) with a sharper quadrant-cell fallback; no whole-screen blinks; menu actions that always lead somewhere. 弄玉's emotions and gestures come only from explicit controls through the Companion API, so an upstream service can decide them; Aster no longer infers them from reply text, events or idle time.

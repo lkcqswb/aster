@@ -71,7 +71,7 @@ aster --companion-profile examples/companion-custom.json \
 - `idle.png`、`speaking.png`、`neutral.png`、`emotion.png`、`motion.png`、`look.png`、`reset.png`：本地预览帧。
 - `renderer.json`：加载和动画诊断。
 
-仅使用 `--live2d-probe DIR` 也会导出接口清单。`--probe-emotion`/`--probe-motion` 需要同时指定它。预览帧是回执时刻的采样，不代表完整动画；终端约 8 fps，短动作可能被跳过部分关键帧。
+仅使用 `--live2d-probe DIR` 也会导出接口清单。`--probe-emotion`/`--probe-motion` 需要同时指定它。预览帧是回执时刻的采样，不代表完整动画；终端约 15 fps（渲染较慢时自动放缓），短动作可能被跳过部分关键帧。
 
 建议 autodesign 流程：读取当前 `interface.json` 和 Schema → 从示例复制完整配置 → 只修改绑定、emotion、motion 或构图 → 运行 `--check-companion` → 用上述探针检查参数及预览 → 在 TUI 中连续播放，确认效果后再使用。`--check-companion` 无需模型资产，只验证配置；探针才验证实际 rig。
 
